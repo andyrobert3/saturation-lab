@@ -1,0 +1,6 @@
+[env]
+# Each integration test spawns its own mock server process and its own
+# multi-threaded runtime, then asserts on timing. Run them one at a time: with
+# eight of them competing for the laptop's cores, a lag assertion fails on
+# scheduler contention and reads like a harness bug when it is not one.
+RUST_TEST_THREADS = "1"

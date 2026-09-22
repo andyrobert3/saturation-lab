@@ -1,0 +1,13 @@
+{
+  "name": "harness-sat",
+  "target_url": "http://127.0.0.1:8123",
+  "model": "mock",
+  "prompt": "hello",
+  "mode": "open",
+  "rate": 100000.0,
+  "duration_s": 2.0,
+  "warmup_s": 0.0,
+  "max_in_flight": 20000,
+  "request_timeout_s": 5.0,
+  "target_notes": "deliberately saturating the harness: cap sized so clipping does not mask the driver's own failure to keep time"
+}
