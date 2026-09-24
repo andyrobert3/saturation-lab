@@ -75,16 +75,20 @@ async fn run_open(
                     let target = target.clone();
                     tasks.spawn(async move {
                         let actual_ns = clock.now_ns();
-                        let outcome = target.send().await;
+                        let outcome = target.send(&clock).await;
                         let completed_ns = clock.now_ns();
                         sink.send(Record {
                             req_id: id,
                             intended_ns: intended_ns(id, interval),
                             actual_ns,
+                            first_output_ns: outcome.first_output_ns,
+                            last_output_ns: outcome.last_output_ns,
                             completed_ns,
+                            output_tokens: outcome.output_tokens,
                             status: outcome.status,
                             http_status: outcome.http_status,
                             bytes: outcome.bytes,
+                            output_events: outcome.output_events,
                         });
                         drop(permit);
                     });
@@ -96,10 +100,14 @@ async fn run_open(
                         req_id: id,
                         intended_ns: intended_ns(id, interval),
                         actual_ns: 0,
+                        first_output_ns: 0,
+                        last_output_ns: 0,
                         completed_ns: 0,
+                        output_tokens: 0,
                         status: Status::Clipped,
                         http_status: 0,
                         bytes: 0,
+                        output_events: Vec::new(),
                     });
                 }
             }
@@ -133,16 +141,20 @@ async fn run_closed(
             while clock.now_ns() < end_ns {
                 let id = next_id.fetch_add(1, Ordering::Relaxed);
                 let actual_ns = clock.now_ns();
-                let outcome = target.send().await;
+                let outcome = target.send(&clock).await;
                 let completed_ns = clock.now_ns();
                 sink.send(Record {
                     req_id: id,
                     intended_ns: actual_ns,
                     actual_ns,
+                    first_output_ns: outcome.first_output_ns,
+                    last_output_ns: outcome.last_output_ns,
                     completed_ns,
+                    output_tokens: outcome.output_tokens,
                     status: outcome.status,
                     http_status: outcome.http_status,
                     bytes: outcome.bytes,
+                    output_events: outcome.output_events,
                 });
             }
         });

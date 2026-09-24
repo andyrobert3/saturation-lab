@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn run directories into the three charts a sweep exists to produce.
+"""Turn run directories into the charts a streaming sweep exists to produce.
 
 The CSV is the source of truth: every percentile on these charts is recomputed
 here from records.csv, never read from summary.json — whose histograms are
@@ -58,21 +58,32 @@ class Run:
         rows = list(csv.DictReader(open(path / "records.csv")))
         self.window_lat = []
         self.warmup_lat = []
+        self.ttft = []
+        self.tpot = []
         self.lags = []  # actual - intended, non-clipped, in window
         completed_in_window_ok = 0
+        ok_requests = set()
         for r in rows:
             status = r["status"]
             intended = int(r["intended_ns"])
             if status != "clipped" and not int(r["warmup"]):
                 self.lags.append((int(r["actual_ns"]) - intended) / 1e6)
             if status == "ok":
-                completed = int(r["completed_ns"])
-                lat = (completed - intended) / 1e6
+                req_id = int(r["req_id"])
+                ok_requests.add(req_id)
+                first = int(r["first_output_ns"])
+                last = int(r["last_output_ns"])
+                output_tokens = int(r["output_tokens"])
+                actual = int(r["actual_ns"])
+                lat = (last - actual) / 1e6
                 if int(r["warmup"]):
                     self.warmup_lat.append(lat)
                 else:
                     self.window_lat.append(lat)
-                if self.warmup_ns <= completed < self.duration_ns:
+                    self.ttft.append((first - actual) / 1e6)
+                    if output_tokens > 1:
+                        self.tpot.append((last - first) / (output_tokens - 1) / 1e6)
+                if self.warmup_ns <= last < self.duration_ns:
                     completed_in_window_ok += 1
         self.served_rate = completed_in_window_ok / max(
             self.config["duration_s"] - self.config["warmup_s"], 1e-9
@@ -80,6 +91,27 @@ class Run:
         budget_ns = self.summary["send_lag_budget_ns"]
         self.late_dispatch_fraction = (
             sum(lag_ms * 1e6 > budget_ns for lag_ms in self.lags) / max(len(self.lags), 1)
+        )
+        self.itl = []
+        output_tokens_in_window = 0
+        events_by_request = {}
+        with open(path / "stream_events.csv") as events_file:
+            for event in csv.DictReader(events_file):
+                req_id = int(event["req_id"])
+                if req_id not in ok_requests:
+                    continue
+                emitted = int(event["emitted_ns"])
+                if self.warmup_ns <= emitted < self.duration_ns:
+                    output_tokens_in_window += int(event["token_count"])
+                if not int(event["request_warmup"]):
+                    events_by_request.setdefault(req_id, []).append(emitted)
+        for emitted_times in events_by_request.values():
+            self.itl.extend(
+                (later - earlier) / 1e6
+                for earlier, later in zip(emitted_times, emitted_times[1:])
+            )
+        self.output_token_rate = output_tokens_in_window / max(
+            self.config["duration_s"] - self.config["warmup_s"], 1e-9
         )
 
     @property
@@ -99,7 +131,12 @@ class Run:
 def percentile(vals, q):
     if not vals:
         return 0.0
-    return statistics.quantiles(sorted(vals), n=1000)[int(q * 999)]
+    vals = sorted(vals)
+    position = (len(vals) - 1) * q
+    lower = int(position)
+    upper = min(lower + 1, len(vals) - 1)
+    fraction = position - lower
+    return vals[lower] * (1 - fraction) + vals[upper] * fraction
 
 
 def style(ax):
@@ -197,7 +234,7 @@ def cdf_plot(runs, out: Path):
     discarded population is part of the experiment even when it is not part of
     the answer.
     """
-    fig, ax = new_fig("successful latency cdf: P(latency <= t), window rows")
+    fig, ax = new_fig("successful E2E latency cdf: P(latency <= t), window rows")
     open_runs = sorted((r for r in runs if r.mode == "open"), key=lambda r: r.rate)
     closed = [r for r in runs if r.mode == "closed"]
     lines = []
@@ -223,10 +260,66 @@ def cdf_plot(runs, out: Path):
         x, y = line.get_xdata()[-1], 1.0
         ax.annotate(label, xy=(x, y), xytext=(4, -2), textcoords="offset points", fontsize=8, color=INK2)
     ax.legend([l for l, _ in lines], [lab for _, lab in lines], fontsize=8, frameon=False, loc="lower right")
-    ax.set_xlabel("successful latency, completed − intended (ms)", color=INK2)
+    ax.set_xlabel("successful E2E, last output − actual send (ms)", color=INK2)
     ax.set_ylabel("cumulative fraction", color=INK2)
     ax.set_ylim(0, 1.02)
     style(ax)
+    fig.savefig(out, bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    return out
+
+
+def token_knee_plot(runs, out: Path):
+    """Successful output tokens emitted inside the measurement window."""
+    open_runs = sorted((r for r in runs if r.mode == "open"), key=lambda r: r.rate)
+    if not open_runs:
+        return None
+    fig, ax = new_fig("output-token throughput")
+    ax.plot(
+        [r.rate for r in open_runs],
+        [r.output_token_rate for r in open_runs],
+        marker="o",
+        linewidth=2,
+        color=SERIES[0],
+    )
+    ax.set_xlabel("requested rate (req/s)", color=INK2)
+    ax.set_ylabel("successful output tokens emitted in window (tok/s)", color=INK2)
+    style(ax)
+    fig.savefig(out, bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    return out
+
+
+def streaming_percentiles_plot(runs, out: Path):
+    """p50/p95/p99 client-observed streaming latency across open-loop rates."""
+    open_runs = sorted((r for r in runs if r.mode == "open"), key=lambda r: r.rate)
+    if not open_runs:
+        return None
+    fig, axes = plt.subplots(2, 2, figsize=(10, 7))
+    fig.patch.set_facecolor(SURFACE)
+    for ax, (name, attribute) in zip(
+        axes.flat,
+        [("TTFT", "ttft"), ("TPOT", "tpot"), ("ITL", "itl"), ("E2E", "window_lat")],
+    ):
+        for q, color, label in [
+            (0.50, SERIES[0], "p50"),
+            (0.95, SERIES[3], "p95"),
+            (0.99, SERIES[7], "p99"),
+        ]:
+            ax.plot(
+                [r.rate for r in open_runs],
+                [percentile(getattr(r, attribute), q) for r in open_runs],
+                marker="o",
+                color=color,
+                label=label,
+            )
+        ax.set_title(name, color=INK, fontsize=10, loc="left")
+        ax.set_xlabel("requested rate (req/s)", color=INK2)
+        ax.set_ylabel("milliseconds", color=INK2)
+        style(ax)
+    axes[0, 0].legend(frameon=False, fontsize=8)
+    fig.suptitle("streaming latency percentiles", color=INK, fontsize=12, x=0.08, ha="left")
+    fig.tight_layout()
     fig.savefig(out, bbox_inches="tight", dpi=150)
     plt.close(fig)
     return out
@@ -298,7 +391,9 @@ def main(argv):
     args.out.mkdir(parents=True, exist_ok=True)
     for f, plot in [
         ("knee.png", knee_plot),
+        ("token-knee.png", token_knee_plot),
         ("latency-cdf.png", cdf_plot),
+        ("streaming-percentiles.png", streaming_percentiles_plot),
         ("send-lag.png", lag_plot),
     ]:
         path = plot(runs, args.out / f)

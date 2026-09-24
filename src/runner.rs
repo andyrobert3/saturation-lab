@@ -44,6 +44,7 @@ pub struct Summary {
     pub requested_rate_hz: f64,
     pub sent_rate_hz: f64,
     pub served_rate_hz: f64,
+    pub output_token_rate_hz: f64,
     pub counters: DriverCounters,
     pub records: RecorderSummary,
     pub wakeup_floor_ns: u64,
@@ -102,8 +103,10 @@ pub async fn run(cfg: RunConfig, runs_root: &std::path::Path) -> Result<RunOutco
     };
     let config_path = dir.join("config.json");
     let records_path = dir.join("records.csv");
+    let events_path = dir.join("stream_events.csv");
     let (recorder, sink) = Recorder::new(
         &records_path,
+        &events_path,
         cfg.warmup_ns(),
         cfg.duration_ns(),
         budget,
@@ -145,6 +148,7 @@ pub async fn run(cfg: RunConfig, runs_root: &std::path::Path) -> Result<RunOutco
         requested_rate_hz: cfg.rate,
         sent_rate_hz: counters.fired as f64 / cfg.duration_s,
         served_rate_hz: records.completed_in_window_ok as f64 / window_s,
+        output_token_rate_hz: records.output_tokens_in_window as f64 / window_s,
         counters,
         records,
         wakeup_floor_ns: floor,
@@ -210,9 +214,16 @@ pub fn failure_reasons(
             records.in_window_timeouts
         ));
     }
+    if records.in_window_stream_errors > 0 {
+        reasons.push(format!(
+            "{} malformed or incomplete stream(s) in the measured window",
+            records.in_window_stream_errors
+        ));
+    }
     let http_errors = records
         .in_window_errors
-        .saturating_sub(records.in_window_timeouts);
+        .saturating_sub(records.in_window_timeouts)
+        .saturating_sub(records.in_window_stream_errors);
     let error_rate = http_errors as f64 / records.in_window.max(1) as f64;
     if error_rate > MAX_ERROR_RATE {
         reasons.push(format!(
@@ -259,21 +270,29 @@ mod tests {
             in_window_ok: 50,
             in_window_errors: 0,
             in_window_timeouts: 0,
+            in_window_stream_errors: 0,
             completed_in_window_ok: 50,
+            output_tokens: 800,
+            output_tokens_in_window: 800,
             late_dispatches: 0,
             late_dispatch_fraction: 0.0,
             warmup_rows: 0,
             by_status: Default::default(),
-            successful_latency_ns: Stats {
+            successful_e2e_ns: Stats {
                 count: 50,
                 p50: 1_000_000,
+                p95: 1_900_000,
                 p99: 2_000_000,
                 p999: 3_000_000,
                 max: 4_000_000,
             },
+            successful_ttft_ns: Stats::default(),
+            successful_tpot_ns: Stats::default(),
+            itl_ns: Stats::default(),
             send_lag_ns: Stats {
                 count: 50,
                 p50: 100_000,
+                p95: 190_000,
                 p99: 200_000,
                 p999: 300_000,
                 max: 400_000,
@@ -390,6 +409,7 @@ mod tests {
         records.send_lag_ns = Stats {
             count: 120,
             p50: 1_841_151,
+            p95: 2_200_000,
             p99: 2_373_631,
             p999: 2_500_000,
             max: 2_500_000,
@@ -457,6 +477,33 @@ mod tests {
         );
         assert!(
             !reasons.iter().any(|r| r.contains("HTTP error rate")),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn any_stream_error_in_the_measured_window_fails() {
+        let cfg = open_cfg(10.0);
+        let counters = DriverCounters {
+            intended: 50,
+            fired: 50,
+            clipped: 0,
+        };
+        let mut records = clean_records();
+        records.in_window_ok = 49;
+        records.in_window_errors = 1;
+        records.in_window_stream_errors = 1;
+        let reasons = failure_reasons(&cfg, &counters, &records);
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("incomplete stream")),
+            "{reasons:?}"
+        );
+        assert!(
+            !reasons
+                .iter()
+                .any(|reason| reason.contains("HTTP error rate")),
             "{reasons:?}"
         );
     }

@@ -3,12 +3,16 @@
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    response::sse::{Event, Sse},
     routing::{get, post},
 };
+use futures_util::{Stream, stream};
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
-use tokio::{sync::Semaphore, time::sleep};
+use std::{convert::Infallible, sync::Arc, time::Duration};
+use tokio::{
+    sync::Semaphore,
+    time::{Instant, sleep_until},
+};
 
 struct AppState {
     slots: Arc<Semaphore>,
@@ -18,27 +22,51 @@ struct AppState {
 async fn completions(
     State(state): State<Arc<AppState>>,
     _body: String,
-) -> (StatusCode, Json<Value>) {
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Queueing, not rejecting: overloaded requests wait, so served rate caps at N/D while latency grows — the knee.
-    let _permit = state.slots.clone().acquire_owned().await.unwrap();
-    sleep(state.service_time).await;
-    (
-        StatusCode::OK,
-        Json(json!({
-            "id": "mock",
-            "choices": [{
-                "text": "m",
-                "index": 0,
-                "logprobs": null,
-                "finish_reason": "length"
-            }],
-            "usage": {
-                "prompt_tokens": 1,
-                "completion_tokens": 16,
-                "total_tokens": 17
-            }
-        })),
-    )
+    let permit = state.slots.clone().acquire_owned().await.unwrap();
+    let stream_start = Instant::now();
+    let output = stream::unfold(
+        (permit, state, stream_start, 0usize),
+        |(permit, state, stream_start, index)| async move {
+            let event = match index {
+                0..16 => {
+                    sleep_until(
+                        stream_start + state.service_time.mul_f64((index + 1) as f64 / 16.0),
+                    )
+                    .await;
+                    Event::default().data(
+                        json!({
+                            "id": "mock",
+                            "choices": [{
+                                "text": "m",
+                                "index": 0,
+                                "token_ids": [index],
+                                "finish_reason": if index == 15 { Some("length") } else { None }
+                            }]
+                        })
+                        .to_string(),
+                    )
+                }
+                16 => Event::default().data(
+                    json!({
+                        "id": "mock",
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 16,
+                            "total_tokens": 17
+                        }
+                    })
+                    .to_string(),
+                ),
+                17 => Event::default().data("[DONE]"),
+                _ => return None,
+            };
+            Some((Ok(event), (permit, state, stream_start, index + 1)))
+        },
+    );
+    Sse::new(output)
 }
 
 async fn version() -> Json<Value> {

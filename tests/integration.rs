@@ -85,7 +85,10 @@ struct Row {
     _req_id: u64,
     intended: u64,
     actual: u64,
+    first_output: u64,
+    last_output: u64,
     completed: u64,
+    output_tokens: u64,
     status: String,
     _http_status: u16,
     bytes: u64,
@@ -94,16 +97,19 @@ struct Row {
 
 fn parse_row(line: &str) -> Row {
     let f: Vec<&str> = line.split(',').collect();
-    assert_eq!(f.len(), 8, "unexpected CSV row: {line}");
+    assert_eq!(f.len(), 11, "unexpected CSV row: {line}");
     Row {
         _req_id: f[0].parse().unwrap(),
         intended: f[1].parse().unwrap(),
         actual: f[2].parse().unwrap(),
-        completed: f[3].parse().unwrap(),
-        status: f[4].to_string(),
-        _http_status: f[5].parse().unwrap(),
-        bytes: f[6].parse().unwrap(),
-        _warmup: f[7].parse().unwrap(),
+        first_output: f[3].parse().unwrap(),
+        last_output: f[4].parse().unwrap(),
+        completed: f[5].parse().unwrap(),
+        output_tokens: f[6].parse().unwrap(),
+        status: f[7].to_string(),
+        _http_status: f[8].parse().unwrap(),
+        bytes: f[9].parse().unwrap(),
+        _warmup: f[10].parse().unwrap(),
     }
 }
 
@@ -123,9 +129,12 @@ async fn drive_after_setup_delay(cfg: &RunConfig, tag: &str, setup_delay: Durati
     let target = Target::new(cfg).unwrap();
 
     let path = std::env::temp_dir().join(format!("satlab-it-{}-{tag}.csv", std::process::id()));
+    let events_path =
+        path.with_file_name(format!("satlab-it-{}-{tag}-events.csv", std::process::id()));
     let budget = satlab::runner::lag_budget_ns((1e9 / cfg.rate).round().max(1.0) as u64, 0);
     let (recorder, sink) = Recorder::new(
         &path,
+        &events_path,
         cfg.warmup_ns(),
         cfg.duration_ns(),
         budget,
@@ -141,6 +150,7 @@ async fn drive_after_setup_delay(cfg: &RunConfig, tag: &str, setup_delay: Durati
 
     let text = std::fs::read_to_string(&path).unwrap();
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&events_path);
 
     Completed {
         summary,
@@ -153,11 +163,15 @@ async fn drive_after_setup_delay(cfg: &RunConfig, tag: &str, setup_delay: Durati
 async fn successful_request_reports_bytes_and_status() {
     let mock = MockServer::start(4, 0.01);
     let target = Target::new(&config_against(&mock)).unwrap();
+    let clock = RunClock::new();
 
-    let out = target.send().await;
+    let out = target.send(&clock).await;
     assert_eq!(out.status, Status::Ok, "got {out:?}");
     assert_eq!(out.http_status, 200);
     assert!(out.bytes > 0, "response body must be read, got 0 bytes");
+    assert_eq!(out.output_tokens, 16);
+    assert_eq!(out.output_events.len(), 16);
+    assert!(out.first_output_ns < out.last_output_ns);
 }
 
 #[tokio::test]
@@ -166,8 +180,9 @@ async fn non_2xx_is_http_error_not_ok() {
     let mut cfg = config_against(&mock);
     cfg.target_url.push_str("/no-such-prefix"); // /no-such-prefix/v1/completions -> 404
     let target = Target::new(&cfg).unwrap();
+    let clock = RunClock::new();
 
-    let out = target.send().await;
+    let out = target.send(&clock).await;
     assert_eq!(out.status, Status::HttpError, "got {out:?}");
     assert_eq!(out.http_status, 404);
 }
@@ -178,10 +193,14 @@ async fn slow_response_past_the_timeout_is_classified_as_timeout() {
     let mut cfg = config_against(&mock);
     cfg.request_timeout_s = 0.3;
     let target = Target::new(&cfg).unwrap();
+    let clock = RunClock::new();
 
-    let out = target.send().await;
+    let out = target.send(&clock).await;
     assert_eq!(out.status, Status::Timeout, "got {out:?}");
-    assert_eq!(out.http_status, 0);
+    assert_eq!(
+        out.http_status, 200,
+        "response headers arrived before the stream timed out"
+    );
 }
 
 #[tokio::test]
@@ -189,12 +208,13 @@ async fn dead_target_is_an_error_but_never_aborts_the_run() {
     let mock = MockServer::start(1, 0.01);
     let cfg = config_against(&mock);
     let target = Target::new(&cfg).unwrap();
+    let clock = RunClock::new();
 
-    assert_eq!(target.send().await.status, Status::Ok);
+    assert_eq!(target.send(&clock).await.status, Status::Ok);
     drop(mock); // connection refused from here on
 
     for attempt in 1..=3 {
-        let out = target.send().await;
+        let out = target.send(&clock).await;
         assert_eq!(out.status, Status::HttpError, "attempt {attempt}: {out:?}");
         assert_eq!(out.http_status, 0, "no HTTP status was received");
     }
@@ -237,6 +257,19 @@ async fn open_loop_keeps_time_when_the_target_can_serve_it() {
         done.rows.iter().all(|r| r.bytes > 0),
         "body read on every row"
     );
+    assert!(
+        done.rows.iter().all(|r| {
+            r.first_output > r.actual
+                && r.last_output >= r.first_output
+                && r.completed >= r.last_output
+                && r.output_tokens == 16
+        }),
+        "every successful stream must carry ordered output timestamps and token counts"
+    );
+    assert_eq!(done.summary.successful_ttft_ns.count, 10);
+    assert_eq!(done.summary.successful_tpot_ns.count, 10);
+    assert_eq!(done.summary.itl_ns.count, 150);
+    assert_eq!(done.summary.output_tokens, 160);
 
     // At a rate the target can serve, dispatch lag should remain comfortably
     // below the budget used by the late-dispatch fraction verdict.
@@ -248,7 +281,7 @@ async fn open_loop_keeps_time_when_the_target_can_serve_it() {
     );
 
     // The dominant term must be the server's own service time, not our noise.
-    let p50 = done.summary.successful_latency_ns.p50;
+    let p50 = done.summary.successful_e2e_ns.p50;
     assert!(
         (80_000_000..200_000_000).contains(&p50),
         "p50 {p50}ns should sit near the mock's 100ms"
@@ -272,7 +305,7 @@ async fn served_rate_counts_only_successes_completed_before_the_deadline() {
         done.summary.in_window_ok, 40,
         "every offered request eventually succeeds"
     );
-    assert_eq!(done.summary.successful_latency_ns.count, 40);
+    assert_eq!(done.summary.successful_e2e_ns.count, 40);
     assert!(
         done.summary.completed_in_window_ok < done.summary.in_window_ok,
         "responses drained after the deadline must not count as served in-window"
@@ -373,7 +406,7 @@ async fn closed_loop_is_self_limiting_and_reports_no_lag() {
 
     // The foil's whole point: throughput stays safe, and the queueing shows up
     // as latency instead. It cannot tell you what happens past capacity.
-    let p50 = done.summary.successful_latency_ns.p50;
+    let p50 = done.summary.successful_e2e_ns.p50;
     assert!(
         p50 > 50_000_000,
         "four clients sharing one slot must queue; p50 was {p50}ns"
