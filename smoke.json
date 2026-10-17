@@ -1,0 +1,13 @@
+{
+  "name": "vllm-metal-smoke",
+  "target_url": "http://127.0.0.1:8000",
+  "model": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+  "prompt": "Explain saturation in one sentence.",
+  "mode": "open",
+  "rate": 1.0,
+  "duration_s": 30.0,
+  "warmup_s": 5.0,
+  "max_in_flight": 32,
+  "request_timeout_s": 120.0,
+  "target_notes": "vLLM Metal compatibility smoke; record exact server and model versions"
+}

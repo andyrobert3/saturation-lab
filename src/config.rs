@@ -21,6 +21,19 @@ fn default_concurrency() -> usize {
     1
 }
 
+/// How arrivals are spaced in open mode. `uniform` keeps today's deterministic
+/// ladder; `poisson` draws exponential inter-arrivals so the load generator is
+/// comparable to vLLM/SGLang benchmarks and can show burst absorption.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Arrival {
+    #[default]
+    Uniform,
+    Poisson,
+    /// Gamma inter-arrivals with this coefficient of variation: `{"gamma": {"cv": 2.0}}`. cv 1 is Poisson; larger is burstier.
+    Gamma { cv: f64 },
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RunConfig {
     /// Becomes part of the run directory name.
@@ -34,6 +47,14 @@ pub struct RunConfig {
     /// Requests per second. Open mode only; in closed mode the arrival rate is an output, not an input.
     #[serde(default)]
     pub rate: f64,
+
+    /// Arrival spacing in open mode; Uniform = current behavior.
+    #[serde(default)]
+    pub arrival: Arrival,
+
+    /// Poisson RNG seed. 0 = drawn from the OS clock and recorded in provenance; any other value makes the arrival sequence reproducible.
+    #[serde(default)]
+    pub seed: u64,
 
     pub duration_s: f64,
     /// Prefix of the run excluded from statistics (the *server* reaching steady state).
@@ -88,6 +109,11 @@ impl RunConfig {
                 "target_url: {:?} must start with http:// or https://",
                 self.target_url
             ));
+        }
+        if let Arrival::Gamma { cv } = self.arrival
+            && !(cv.is_finite() && cv > 0.0)
+        {
+            bad.push(format!("arrival.gamma.cv: {cv} must be a positive number"));
         }
         if self.model.is_empty() {
             bad.push("model: must not be empty".into());
@@ -176,6 +202,8 @@ mod tests {
             prompt: "p".into(),
             mode: Mode::Open,
             rate: 10.0,
+            arrival: Arrival::Uniform,
+            seed: 0,
             duration_s: 5.0,
             warmup_s: 1.0,
             max_in_flight: 32,

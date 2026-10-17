@@ -2,10 +2,13 @@
 
 use crate::{
     clock::RunClock,
-    config::{Mode, RunConfig},
+    config::{Arrival, Mode, RunConfig},
     recorder::{Record, RecordSink},
     target::{Status, Target},
 };
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use rand_distr::Gamma;
 use serde::Serialize;
 use std::sync::{
     Arc,
@@ -25,9 +28,81 @@ fn interval_ns(rate_hz: f64) -> f64 {
     (1e9 / rate_hz).max(1.0)
 }
 
-/// Round each absolute ideal time, rather than multiplying a rounded period.
-fn intended_ns(i: u64, interval: f64) -> u64 {
-    (i as f64 * interval).round().min(u64::MAX as f64) as u64
+/// Absolute intended arrival times: the deterministic ladder for Uniform, an
+/// exponential-inter-arrival (Poisson) draw for Poisson. Both are reproducible
+/// given the seed; the schedule owns its position, so a late wakeup is caught
+/// up in a burst carrying the true intended times.
+struct ArrivalSchedule {
+    next_ns: u64,
+    end_ns: u64,
+    i: u64,               // Uniform ladder counter
+    interval_ns: f64,     // Uniform: 1e9/rate
+    rate: f64,            // Poisson: arrivals per second
+    rng: Option<StdRng>,  // Poisson only
+    gamma: Option<Gamma<f64>>, // Gamma only: inter-arrival seconds
+}
+
+impl ArrivalSchedule {
+    fn new(cfg: &RunConfig, end_ns: u64, seed: u64) -> Self {
+        match cfg.arrival {
+            Arrival::Uniform => Self {
+                next_ns: 0,
+                end_ns,
+                i: 0,
+                interval_ns: interval_ns(cfg.rate),
+                rate: 0.0,
+                rng: None,
+                gamma: None,
+            },
+            Arrival::Poisson => Self {
+                next_ns: 0,
+                end_ns,
+                i: 0,
+                interval_ns: 0.0,
+                rate: cfg.rate,
+                rng: Some(StdRng::seed_from_u64(seed)),
+                gamma: None,
+            },
+            // Shape 1/cv² and scale cv²/rate give mean 1/rate and the requested cv.
+            Arrival::Gamma { cv } => Self {
+                next_ns: 0,
+                end_ns,
+                i: 0,
+                interval_ns: 0.0,
+                rate: cfg.rate,
+                rng: Some(StdRng::seed_from_u64(seed)),
+                gamma: Gamma::new(1.0 / (cv * cv), cv * cv / cfg.rate).ok(),
+            },
+        }
+    }
+
+    /// Next intended deadline, or None once past end_ns.
+    fn next_intended(&mut self) -> Option<u64> {
+        if self.next_ns >= self.end_ns {
+            return None;
+        }
+        let due = self.next_ns;
+        match self.rng.as_mut() {
+            None => {
+                self.i += 1;
+                self.next_ns =
+                    (self.i as f64 * self.interval_ns).round().min(u64::MAX as f64) as u64;
+            }
+            Some(rng) => {
+                // Exponential inter-arrival: u uniform in (0,1), x = -ln(u)/λ
+                // has density λ·e^(−λx) — a Poisson process with rate λ.
+                let dt = match &self.gamma {
+                    Some(gamma) => rng.sample(gamma) * 1e9,
+                    None => {
+                        let u: f64 = rng.sample(rand::distributions::Open01);
+                        (-u.ln() / self.rate) * 1e9
+                    }
+                };
+                self.next_ns = self.next_ns.saturating_add(dt.max(1.0) as u64);
+            }
+        }
+        Some(due)
+    }
 }
 
 pub async fn run(
@@ -35,9 +110,10 @@ pub async fn run(
     clock: Arc<RunClock>,
     sink: RecordSink,
     target: Target,
+    seed: u64,
 ) -> DriverCounters {
     match cfg.mode {
-        Mode::Open => run_open(cfg, clock, sink, target).await,
+        Mode::Open => run_open(cfg, clock, sink, target, seed).await,
         Mode::Closed => run_closed(cfg, clock, sink, target).await,
     }
 }
@@ -52,67 +128,67 @@ async fn run_open(
     clock: Arc<RunClock>,
     sink: RecordSink,
     target: Target,
+    seed: u64,
 ) -> DriverCounters {
-    let interval = interval_ns(cfg.rate);
     let end_ns = cfg.duration_ns();
     let cap = Arc::new(Semaphore::new(cfg.max_in_flight));
     let mut counters = DriverCounters::default();
     let mut tasks = JoinSet::new();
+    let mut sched = ArrivalSchedule::new(cfg, end_ns, seed);
     let mut id: u64 = 0;
 
-    while intended_ns(id, interval) < end_ns {
-        if clock.now_ns() < intended_ns(id, interval) {
-            sleep_until_ns(&clock, intended_ns(id, interval)).await;
+    while let Some(intended_ns) = sched.next_intended() {
+        if clock.now_ns() < intended_ns {
+            sleep_until_ns(&clock, intended_ns).await;
         }
-        // Catch-up burst: release everything that fell due while we slept; queueing it would convert open loop into closed.
-        while intended_ns(id, interval) < end_ns && clock.now_ns() >= intended_ns(id, interval) {
-            counters.intended += 1;
-            match cap.clone().try_acquire_owned() {
-                Ok(permit) => {
-                    counters.fired += 1;
-                    let sink = sink.clone();
-                    let clock = clock.clone();
-                    let target = target.clone();
-                    tasks.spawn(async move {
-                        let actual_ns = clock.now_ns();
-                        let outcome = target.send(&clock).await;
-                        let completed_ns = clock.now_ns();
-                        sink.send(Record {
-                            req_id: id,
-                            intended_ns: intended_ns(id, interval),
-                            actual_ns,
-                            first_output_ns: outcome.first_output_ns,
-                            last_output_ns: outcome.last_output_ns,
-                            completed_ns,
-                            output_tokens: outcome.output_tokens,
-                            status: outcome.status,
-                            http_status: outcome.http_status,
-                            bytes: outcome.bytes,
-                            output_events: outcome.output_events,
-                        });
-                        drop(permit);
-                    });
-                }
-                Err(_) => {
-                    counters.clipped += 1;
-                    // A clipped request was never sent, so it carries no lag sample.
+        // Behind schedule -> fires immediately; that is the catch-up burst,
+        // carrying the true intended time. No inner while-loop.
+        counters.intended += 1;
+        match cap.clone().try_acquire_owned() {
+            Ok(permit) => {
+                counters.fired += 1;
+                let sink = sink.clone();
+                let clock = clock.clone();
+                let target = target.clone();
+                tasks.spawn(async move {
+                    let actual_ns = clock.now_ns();
+                    let outcome = target.send(&clock).await;
+                    let completed_ns = clock.now_ns();
                     sink.send(Record {
                         req_id: id,
-                        intended_ns: intended_ns(id, interval),
-                        actual_ns: 0,
-                        first_output_ns: 0,
-                        last_output_ns: 0,
-                        completed_ns: 0,
-                        output_tokens: 0,
-                        status: Status::Clipped,
-                        http_status: 0,
-                        bytes: 0,
-                        output_events: Vec::new(),
+                        intended_ns,
+                        actual_ns,
+                        first_output_ns: outcome.first_output_ns,
+                        last_output_ns: outcome.last_output_ns,
+                        completed_ns,
+                        output_tokens: outcome.output_tokens,
+                        status: outcome.status,
+                        http_status: outcome.http_status,
+                        bytes: outcome.bytes,
+                        output_events: outcome.output_events,
                     });
-                }
+                    drop(permit);
+                });
             }
-            id += 1;
+            Err(_) => {
+                counters.clipped += 1;
+                // A clipped request was never sent, so it carries no lag sample.
+                sink.send(Record {
+                    req_id: id,
+                    intended_ns,
+                    actual_ns: 0,
+                    first_output_ns: 0,
+                    last_output_ns: 0,
+                    completed_ns: 0,
+                    output_tokens: 0,
+                    status: Status::Clipped,
+                    http_status: 0,
+                    bytes: 0,
+                    output_events: Vec::new(),
+                });
+            }
         }
+        id += 1;
     }
 
     while let Some(joined) = tasks.join_next().await {
@@ -175,48 +251,66 @@ async fn run_closed(
 mod tests {
     use super::*;
 
-    #[test]
-    fn intended_times_scale_linearly_and_saturate_instead_of_wrapping() {
-        let interval = interval_ns(1.0);
-        assert_eq!(intended_ns(0, interval), 0);
-        assert_eq!(intended_ns(3, interval), 3_000_000_000);
-        // an absurd rate still yields an interval of at least 1 ns
-        assert_eq!(interval_ns(1e12), 1.0);
-        // u64::MAX × 1s overflows u64; the product must saturate, not wrap
-        assert_eq!(intended_ns(u64::MAX, interval), u64::MAX);
+    fn test_cfg(rate: f64, arrival: Arrival) -> RunConfig {
+        RunConfig {
+            name: "t".into(),
+            target_url: "http://localhost:8000".into(),
+            model: "m".into(),
+            prompt: "p".into(),
+            mode: Mode::Open,
+            rate,
+            arrival,
+            seed: 0,
+            duration_s: 1.0,
+            warmup_s: 0.0,
+            max_in_flight: 32,
+            concurrency: 1,
+            request_timeout_s: 30.0,
+            channel_capacity: 1024,
+            target_notes: None,
+        }
     }
 
     #[test]
-    fn fractional_rate_does_not_drift_across_one_second() {
-        let interval = interval_ns(70.0);
-        assert_eq!(intended_ns(70, interval), 1_000_000_000);
+    fn uniform_schedule_matches_the_ladder() {
+        let cfg = test_cfg(2.0, Arrival::Uniform);
+        let mut sched = ArrivalSchedule::new(&cfg, u64::MAX / 4, 0);
+        let times: Vec<u64> = (0..6).map(|_| sched.next_intended().unwrap()).collect();
         assert_eq!(
-            (0..)
-                .take_while(|&i| intended_ns(i, interval) < 1_000_000_000)
-                .count(),
-            70
+            times,
+            vec![
+                0,
+                500_000_000,
+                1_000_000_000,
+                1_500_000_000,
+                2_000_000_000,
+                2_500_000_000
+            ]
         );
     }
 
     #[test]
-    fn duration_boundary_defines_the_arrival_count() {
-        let interval = interval_ns(2.1);
-        let arrivals: Vec<u64> = (0..)
-            .map(|i| intended_ns(i, interval))
-            .take_while(|&ns| ns < 1_000_000_000)
-            .collect();
-        assert_eq!(arrivals, vec![0, 476_190_476, 952_380_952]);
+    fn poisson_schedule_is_reproducible_with_seed() {
+        let collect = |seed: u64| {
+            let cfg = test_cfg(10.0, Arrival::Poisson);
+            let mut sched = ArrivalSchedule::new(&cfg, 1_000_000_000, seed);
+            std::iter::from_fn(|| sched.next_intended()).collect::<Vec<u64>>()
+        };
+        assert_eq!(collect(7), collect(7));
+        assert_ne!(collect(7), collect(8));
     }
 
     #[test]
-    fn long_fractional_schedule_uses_the_absolute_formula() {
-        let rate = 3.3;
-        let interval = interval_ns(rate);
-        for i in [1, 10, 1_000, 1_000_000] {
-            assert_eq!(
-                intended_ns(i, interval),
-                (i as f64 * 1e9 / rate).round() as u64
-            );
-        }
+    fn gamma_schedule_has_the_requested_mean_and_cv() {
+        let cfg = test_cfg(50.0, Arrival::Gamma { cv: 2.0 });
+        let mut sched = ArrivalSchedule::new(&cfg, 2_000_000_000_000, 1);
+        let times: Vec<f64> = std::iter::from_fn(|| sched.next_intended())
+            .map(|t| t as f64)
+            .collect();
+        let gaps: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).collect();
+        let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
+        let var = gaps.iter().map(|g| (g - mean).powi(2)).sum::<f64>() / gaps.len() as f64;
+        assert!((mean / 20_000_000.0 - 1.0).abs() < 0.03, "mean gap {mean}");
+        assert!((var.sqrt() / mean / 2.0 - 1.0).abs() < 0.05, "cv {}", var.sqrt() / mean);
     }
 }

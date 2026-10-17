@@ -7,7 +7,7 @@
   "duration_s": 10.0,
   "warmup_s": 1.0,
   "max_in_flight": 32,
-  "concurrency": 8,
+  "concurrency": 4,
   "request_timeout_s": 5.0,
   "target_notes": "axum mock, capacity 4/0.05s = 80 req/s; closed loop is the labelled foil"
 }

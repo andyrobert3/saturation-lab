@@ -5,7 +5,7 @@
 
 use satlab::{
     clock::RunClock,
-    config::{Mode, RunConfig},
+    config::{Arrival, Mode, RunConfig},
     driver,
     recorder::{Recorder, RecorderSummary},
     target::{Status, Target, probe_version},
@@ -70,6 +70,8 @@ fn config_against(mock: &MockServer) -> RunConfig {
         prompt: "hello".into(),
         mode: Mode::Open,
         rate: 10.0,
+        arrival: Arrival::Uniform,
+        seed: 0,
         duration_s: 1.0,
         warmup_s: 0.0,
         max_in_flight: 8,
@@ -145,7 +147,7 @@ async fn drive_after_setup_delay(cfg: &RunConfig, tag: &str, setup_delay: Durati
     let writer = tokio::spawn(recorder.run());
     tokio::time::sleep(setup_delay).await;
     let clock = Arc::new(RunClock::new());
-    let counters = driver::run(cfg, clock, sink, target).await;
+    let counters = driver::run(cfg, clock, sink, target, 0).await;
     let summary = writer.await.unwrap();
 
     let text = std::fs::read_to_string(&path).unwrap();

@@ -73,7 +73,8 @@ fn report(outcome: &runner::RunOutcome) {
         .iter()
         .map(|(status, n)| format!("{status}={n}"))
         .collect();
-    println!("run: {} ({})", outcome.dir.display(), s.mode);
+    println!("run: {} ({:?})", outcome.dir.display(), s.mode);
+    println!("  arrival:     {:?} (seed {})", s.arrival, s.seed);
     println!("  target:      {}  (git {})", s.target_url, s.git_sha);
     println!("  requested:   {:.1} req/s", s.requested_rate_hz);
     println!(

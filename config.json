@@ -1,0 +1,12 @@
+{
+  "name": "demo",
+  "target_url": "http://127.0.0.1:8123",
+  "model": "mock",
+  "prompt": "hi",
+  "mode": "open",
+  "rate": 80,
+  "duration_s": 30,
+  "warmup_s": 3,
+  "max_in_flight": 1024,
+  "request_timeout_s": 60
+}

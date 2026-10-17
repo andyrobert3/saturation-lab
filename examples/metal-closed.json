@@ -1,0 +1,13 @@
+{
+  "name": "vllm-metal-closed-32",
+  "target_url": "http://127.0.0.1:8000",
+  "model": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+  "prompt": "Explain saturation in one sentence.",
+  "mode": "closed",
+  "duration_s": 60.0,
+  "warmup_s": 10.0,
+  "max_in_flight": 512,
+  "concurrency": 32,
+  "request_timeout_s": 120.0,
+  "target_notes": "launch=vllm serve mlx-community/Meta-Llama-3.1-8B-Instruct-4bit --host 127.0.0.1 --port 8000 --max-model-len 8192 --gpu-memory-utilization 0.60; cache=<state it>; power=<state it>; model revision=<pin it>"
+}

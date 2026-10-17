@@ -52,6 +52,8 @@ pub struct Target {
     url: String,
     /// Serialized once at construction: re-encoding the same JSON per request is harness CPU spent on nothing.
     body: Vec<u8>,
+    /// Byte offset of the 6-digit prompt prefix inside `body`, rewritten per request.
+    prefix_at: usize,
 }
 
 impl Target {
@@ -65,7 +67,8 @@ impl Target {
 
         let body = serde_json::to_vec(&serde_json::json!({
             "model": cfg.model,
-            "prompt": cfg.prompt,
+            // A random 6-digit prefix (2 tokens on Llama 3) so no two prompts share a prefix-cache block.
+            "prompt": format!("000000 {}", cfg.prompt),
             "max_tokens": 16,
             "ignore_eos": true,
             "stream": true,
@@ -74,12 +77,27 @@ impl Target {
             "temperature": 0.0,
         }))
         .context("encoding request body")?;
+        let key = b"\"prompt\":\"000000";
+        let prefix_at = body
+            .windows(key.len())
+            .position(|w| w == key)
+            .context("locating the prompt prefix")?
+            + key.len()
+            - 6;
 
         Ok(Self {
             client,
             url: cfg.completions_url(),
             body,
+            prefix_at,
         })
+    }
+
+    fn body_with_random_prefix(&self) -> Vec<u8> {
+        let mut body = self.body.clone();
+        let digits = format!("{:06}", rand::random::<u32>() % 1_000_000);
+        body[self.prefix_at..self.prefix_at + 6].copy_from_slice(digits.as_bytes());
+        body
     }
 
     /// One attempt. Never errors: a failed request is a data point, not a reason to abandon a run.
@@ -88,7 +106,7 @@ impl Target {
             .client
             .post(&self.url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(self.body.clone())
+            .body(self.body_with_random_prefix())
             .send()
             .await
         {
@@ -263,5 +281,33 @@ pub async fn probe_version(cfg: &RunConfig) -> String {
             .unwrap_or_else(|_| "unknown".into()),
         Ok(resp) => format!("unknown (HTTP {})", resp.status().as_u16()),
         Err(_) => "unknown".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_body_gets_a_six_digit_prefix_and_stays_valid_json() {
+        let cfg: RunConfig = serde_json::from_str(
+            r#"{"name":"t","target_url":"http://localhost:1","model":"m","prompt":"say \"hi\"",
+                "mode":"open","rate":1,"duration_s":1,"max_in_flight":1,"request_timeout_s":1}"#,
+        )
+        .unwrap();
+        let target = Target::new(&cfg).unwrap();
+        let prompts: Vec<String> = (0..20)
+            .map(|_| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&target.body_with_random_prefix()).unwrap();
+                body["prompt"].as_str().unwrap().to_string()
+            })
+            .collect();
+        for prompt in &prompts {
+            let (digits, rest) = prompt.split_at(6);
+            assert!(digits.bytes().all(|b| b.is_ascii_digit()), "{prompt}");
+            assert_eq!(rest, " say \"hi\"");
+        }
+        assert!(prompts.iter().any(|p| p != &prompts[0]), "prefixes never change");
     }
 }

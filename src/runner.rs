@@ -2,7 +2,7 @@
 
 use crate::{
     clock::{RunClock, wakeup_floor_ns},
-    config::{Mode, RunConfig},
+    config::{Arrival, Mode, RunConfig},
     driver::{self, DriverCounters},
     recorder::{Recorder, RecorderSummary},
     target::{self, Target},
@@ -28,6 +28,8 @@ pub struct Provenance {
     pub run_started_utc: String,
     pub target_url: String,
     pub target_version: String,
+    pub arrival: Arrival,
+    pub seed: u64,
 }
 
 #[derive(Serialize)]
@@ -38,7 +40,9 @@ pub struct ConfigFile {
 
 #[derive(Serialize)]
 pub struct Summary {
-    pub mode: String,
+    pub mode: Mode,
+    pub arrival: Arrival,
+    pub seed: u64,
     pub git_sha: String,
     pub target_url: String,
     pub requested_rate_hz: f64,
@@ -113,6 +117,14 @@ pub async fn run(cfg: RunConfig, runs_root: &std::path::Path) -> Result<RunOutco
         cfg.channel_capacity,
     )?;
     let target = Target::new(&cfg)?;
+    let resolved_seed = if cfg.seed != 0 {
+        cfg.seed
+    } else {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0)
+    };
     let mut config_file = ConfigFile {
         config: cfg.clone(),
         provenance: Provenance {
@@ -123,6 +135,8 @@ pub async fn run(cfg: RunConfig, runs_root: &std::path::Path) -> Result<RunOutco
             run_started_utc: utc,
             target_url: cfg.target_url.clone(),
             target_version: version,
+            arrival: cfg.arrival,
+            seed: resolved_seed,
         },
     };
     write_json(&config_path, &config_file)?;
@@ -130,7 +144,7 @@ pub async fn run(cfg: RunConfig, runs_root: &std::path::Path) -> Result<RunOutco
     let recorder_handle = tokio::spawn(recorder.run());
     let clock = Arc::new(RunClock::new());
     config_file.provenance.anchor_wall_unix_ns = Some(clock.wall_unix_ns());
-    let counters = driver::run(&cfg, clock, sink, target).await;
+    let counters = driver::run(&cfg, clock, sink, target, resolved_seed).await;
     let records = recorder_handle.await.context("recorder task panicked")?;
     write_json(&config_path, &config_file)?;
 
@@ -138,11 +152,9 @@ pub async fn run(cfg: RunConfig, runs_root: &std::path::Path) -> Result<RunOutco
     let window_s = cfg.duration_s - cfg.warmup_s;
 
     let summary = Summary {
-        mode: match cfg.mode {
-            Mode::Open => "open",
-            Mode::Closed => "closed",
-        }
-        .into(),
+        mode: cfg.mode,
+        arrival: cfg.arrival,
+        seed: resolved_seed,
         git_sha: GIT_SHA.into(),
         target_url: cfg.target_url.clone(),
         requested_rate_hz: cfg.rate,
@@ -252,6 +264,8 @@ mod tests {
             prompt: "p".into(),
             mode: Mode::Open,
             rate,
+            arrival: Arrival::Uniform,
+            seed: 0,
             duration_s: 5.0,
             warmup_s: 0.0,
             max_in_flight: 32,
@@ -551,6 +565,8 @@ mod tests {
                 run_started_utc: "20260913T000000Z".into(),
                 target_url: "http://localhost:1".into(),
                 target_version: "test".into(),
+                arrival: Arrival::Uniform,
+                seed: 0,
             },
         };
 

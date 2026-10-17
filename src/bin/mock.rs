@@ -96,7 +96,7 @@ async fn main() {
     let port: u16 = args
         .get(3)
         .map(|s| s.parse().unwrap_or_else(|_| die("port must be 0-65535")))
-        .unwrap_or(8080);
+        .unwrap_or(8123);
 
     let state = Arc::new(AppState {
         slots: Arc::new(Semaphore::new(n)),

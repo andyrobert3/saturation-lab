@@ -49,10 +49,6 @@ impl RecordSink {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
-
-    pub fn dropped(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
