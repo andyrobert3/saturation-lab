@@ -55,6 +55,8 @@ To check the client against the server's own `/metrics`, run
 ## 4. Sweeps
 
 Record the launch flags with every sweep. `--server-notes` is required.
+satlab raises its open-file limit at start (one socket per request in flight); if the
+hard limit is too low it stops with a message. Check with `ulimit -Hn`.
 
 ```bash
 NOTES='launch=vllm serve mlx-community/Meta-Llama-3.1-8B-Instruct-4bit --host 127.0.0.1 --port 8000 --max-model-len 8192 --gpu-memory-utilization 0.60 --max-num-seqs 256; cache=<state it>; power=<state it>; model revision=241a666dad6cb93c8ff213d39a7f34a36bf26db4'

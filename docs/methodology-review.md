@@ -139,6 +139,7 @@ RESOLVED = the pilot data shows no problem.
 | 16 | Internal | Late sends hide waiting (coordinated omission). | All open-loop latency. | Planned-send latency is at most 4.6 ms longer (0.09% at p99) (Step 2). | — | RESOLVED for the pilot |
 | 17 | Internal | Network reads bunch token events, so the timestamps are wrong. | TPOT, ITL. | 0% of 42,000 gaps below 1 ms in four sample runs (6.5, 12, 16.5 req/s open; 32 workers closed). Each event carries one token. | — | RESOLVED for the pilot |
 | 18 | Internal | Records are lost or clipped. | All values. | 0 clipped, 0 dropped; all 54 runs pass the contract checks (Step 2). | — | RESOLVED for the pilot |
+| 19 | Internal | A client resource limit caps the load: macOS gives a shell 256 open files, so at most 246 requests are in flight and the rest fail at once with HTTP status 0. | Any overload result: served rate, backlog growth, `waiting`. | Task 8a: 13–16.5 req/s runs capped at 246 in flight, 5–27% errors. | satlab raises its open-file limit at start or stops (`ensure_file_limit`). Re-run (`8a-overload`). | RESOLVED (fix); the pilot passed with 437 in flight, so its shell had a higher limit. |
 
 Claims in `talk.md` that change because of this review:
 - "Overload lowers throughput" is not supported (threat 1).
@@ -501,6 +502,57 @@ if its threshold is not met; the result is recorded either way.
 8f, CUDA (SKIPPED, no NVIDIA GPU; kept for the record): on vLLM with CUDA, closed tok/s does not fall when the
 batch grows from 1 to 64 workers (each step within 5% of monotonic). If it
 holds, the Metal step shape (Task 6) is not a general vLLM property.
+
+Results of 8a (2026-10-18, 09:55–10:26 UTC; `runs/methodology_review/task8/8a/`,
+`8a-closed/`, `8a-report/`):
+
+| # | Result | Status |
+|---|---|---|
+| 8a.1 | Served 6.51 / 9.00 / 10.99 req/s at 6.5 / 9 / 11. The 13–16.5 runs are not valid (client limit, threat 19). | HELD for ≤ 11; 13–16.5 re-run in `8a-overload/` |
+| 8a.2 | Not valid (client limit). | Re-run |
+| 8a.3 | Medium attainment 100% at 11 req/s, 0% at 12 req/s. | HELD |
+| 8a.4 | N at 115 s: 15 (6.5), **37 (9)**, 47 (11), 120–129 (12); slopes 0.00–0.01/s. The 13+ slopes are not valid. | NOT HELD at 9 req/s (anomaly A7); re-run 13+ |
+| 8a.5 | 12 req/s: `waiting` max 0 in 123 samples per run; E2E p50 10.0 s. The 16.5 part is not valid. | HELD at 12; re-run 16.5 |
+| 8a.6 | L / λ·W: 14.7 / 14.8, 37.1 / 37.1, 46.8 / 46.8. | HELD |
+| 8a.7 | Client minus server TTFT mean 2.5–13.3 ms; TPOT means within 0.1% (6.5–12 req/s, 8 runs). | HELD |
+| 8a.9 | Closed 16 / 32 / 64 workers: 116 / 192 / 202 tok/s against 116 / 181 / 193 (0%, +6%, +5%). | HELD |
+| 8a.10 | Open E2E p50 at 12 req/s 10.0 s against closed 64 workers 5.03 s (2.0×). | HELD |
+
+Threat 19 found in 8a. Every run at 13, 14.5 and 16.5 req/s has exactly 246
+requests in flight at its maximum. The errors are `http_error` with HTTP
+status 0, and each fails 0.05 ms after the send, before any reply. Cause: a
+macOS shell has a soft limit of 256 open files (`launchctl limit maxfiles`);
+each request in flight holds a socket. vLLM raises its own limit to 65535
+(`vllm/utils/system_utils.py:285`); satlab did not. The harness verdict marked
+the runs FAILED, as designed. Fix: satlab now raises its soft limit to
+`max_in_flight` + 64 at start, or stops with a clear message
+(`ensure_file_limit` in `src/runner.rs`). The failed runs stay in `8a/` as
+evidence.
+
+### Task 8: E7, the 9 req/s slow branch (written 2026-10-18, 10:48 UTC, before the run)
+
+Anomaly A7: at 9 req/s, both 8a repeats settle at N = 37 within 15 s, with
+TPOT 231 ms and 48.4 tokens per engine step (32.2 decode + 16.1 prompt;
+`metrics_before/after.prom`). The pilot at 9 req/s settled at N = 20 with
+TPOT 130 ms. 6.5 and 11 req/s agree with the pilot.
+
+- H7a: the random prefix made the prompt 8 tokens instead of 7. At 9 req/s a
+  step is then near the 32-row block limit of the matrix multiply (Task 6).
+  One step over the limit costs a second block (about 213 ms instead of
+  130 ms); more requests arrive during it, so the next step is large too. The
+  closed-loop throughput is not monotonic (32 workers 11.3 req/s, 40 workers
+  9.2 req/s), so the system can stay on this slow branch.
+- H7b: a start transient or the server state of this session, not the prompt.
+- Test: in the same server session, one 9 req/s uniform run with a 7-token
+  prompt ("Explain saturation in a sentence" + prefix: 7 tokens for 20,000 of
+  20,000 random prefixes), then one 9 req/s control run with the 8-token
+  prompt. `run.sh e7`.
+- E7.1 (H7a): the 7-token run has N at 115 s ≤ 25 and TPOT p50 ≤ 150 ms.
+- E7.2: the 8-token control run has N at 115 s ≥ 30.
+- If the 7-token run also has N ≥ 30, H7a is false. If both runs have N ≤ 25,
+  the 8a result was a session effect (H7b).
+- Note: predictions 8c.2 and 8d.1 assumed the fast branch at 9 req/s. They
+  stay as written; their results will be read with A7.
 
 Slide claims and the prediction that tests each:
 

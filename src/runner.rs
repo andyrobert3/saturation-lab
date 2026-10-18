@@ -70,6 +70,37 @@ pub fn lag_budget_ns(interval_ns: u64, wakeup_floor_ns: u64) -> u64 {
         .max(MIN_LAG_BUDGET_NS)
 }
 
+/// Raise the soft open-file limit to `needed` (one socket per request in flight). A macOS
+/// shell starts at 256, which caps the load at about 246 requests and turns the rest into
+/// instant connection errors. Fails when the hard limit is lower than `needed`.
+pub fn ensure_file_limit(needed: u64) -> Result<u64> {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit and setrlimit only read or write the struct passed to them.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+        anyhow::bail!("getrlimit: {}", std::io::Error::last_os_error());
+    }
+    if lim.rlim_cur >= needed {
+        return Ok(lim.rlim_cur);
+    }
+    if lim.rlim_max < needed {
+        anyhow::bail!(
+            "open-file hard limit {} is below the {needed} that max_in_flight needs",
+            lim.rlim_max
+        );
+    }
+    lim.rlim_cur = needed;
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) } != 0 {
+        anyhow::bail!(
+            "cannot raise the open-file limit to {needed}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(needed)
+}
+
 fn hostname() -> String {
     Command::new("hostname")
         .output()
@@ -94,6 +125,8 @@ fn create_run_dir(runs_root: &std::path::Path, utc: &str, name: &str) -> Result<
 }
 
 pub async fn run(cfg: RunConfig, runs_root: &std::path::Path) -> Result<RunOutcome> {
+    // Every request in flight holds a socket; a low limit would silently cap the load.
+    ensure_file_limit(cfg.max_in_flight.max(cfg.concurrency) as u64 + 64)?;
     let utc = RunClock::utc_stamp();
     let host = hostname();
     let version = target::probe_version(&cfg).await;
@@ -255,6 +288,22 @@ mod tests {
         config::{Mode, RunConfig},
         recorder::Stats,
     };
+
+    #[test]
+    fn file_limit_is_raised_to_cover_requests_in_flight() {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) };
+        let want = (lim.rlim_cur + 100).min(lim.rlim_max).min(10_000);
+        assert!(ensure_file_limit(want).unwrap() >= want);
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) };
+        assert!(lim.rlim_cur >= want);
+        if lim.rlim_max != libc::RLIM_INFINITY {
+            assert!(ensure_file_limit(lim.rlim_max + 1).is_err());
+        }
+    }
 
     fn open_cfg(rate: f64) -> RunConfig {
         RunConfig {
