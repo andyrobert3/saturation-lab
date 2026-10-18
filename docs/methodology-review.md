@@ -529,6 +529,38 @@ the runs FAILED, as designed. Fix: satlab now raises its soft limit to
 (`ensure_file_limit` in `src/runner.rs`). The failed runs stay in `8a/` as
 evidence.
 
+Results of the 8a re-run at 13–16.5 req/s (2026-10-18, 11:19–11:34 UTC;
+`runs/methodology_review/task8/8a-overload/`, commit `f1851b7`, with the file-limit
+fix). All 6 runs PASS; up to 736 requests in flight; 0 errors.
+
+| Offered req/s | 13 | 14.5 | 16.5 |
+|---|---:|---:|---:|
+| Served, 30–120 s, req/s (2 runs) | 11.36, 11.48 | 11.72, 11.88 | 12.02, 12.03 |
+| Served, 60–120 s, req/s | 11.87, 12.12 | 12.00, 12.17 | 11.92, 11.93 |
+| Slope of N, 60–120 s, per s | 0.95, 0.87 | 2.45, 2.39 | 4.58, 4.56 |
+| N at the end | 319, 309 | 492, 474 | 729, 734 |
+| E2E p50, s | 22.0, 22.0 | 31.1, 30.1 | 44.0, 43.7 |
+| Server `running` max / `waiting` max | 242–243 / 50–55 | 244–245 / 217–225 | 247 / 462–464 |
+| First `waiting` > 0, s after start | 66.0, 65.7 | 35.2, 35.4 | 24.1, 23.2 |
+
+| # | Result | Status |
+|---|---|---|
+| 8a.1 | Served 11.4–12.0 req/s at 13–16.5 (range 10.5–13.0). | HELD |
+| 8a.2 | Served at 16.5 (12.03) ≥ served at 13 (11.42) − 1.0. In 60–120 s all six runs serve 11.9–12.2 req/s. | HELD. Overload does not lower throughput. |
+| 8a.4 | Slopes 0.87–0.95, 2.39–2.45, 4.56–4.58 per s (≥ +0.5). They match offered minus capacity: 13 − 12 = 1, 14.5 − 12 = 2.5, 16.5 − 12 = 4.5. | HELD |
+| 8a.5 | At 16.5 req/s `waiting` becomes > 0 at 23–24 s and reaches 462–464. The `running` gauge stops at 242–247, not 256. | HELD, with a note |
+
+Note on 8a.5: `running` never shows 256. A likely cause (not tested): the gauge
+is read between engine steps, after the requests that finished in the last
+step have left and before new ones are admitted. At about 16 steps per
+request, about 1/16 of 256 (16) finish in each step. The pilot showed the same
+maximum (246).
+
+Reading: capacity is 12 req/s (about 190 tok/s), and overload adds requests to
+the backlog at offered minus 12 per second, without limit. The server shows
+the queue in `waiting` only after about 245 requests are already in the batch.
+At 13 req/s that is 66 s into the run, when E2E p50 is already above 20 s.
+
 ### Task 8: E7, the 9 req/s slow branch (written 2026-10-18, 10:48 UTC, before the run)
 
 Anomaly A7: at 9 req/s, both 8a repeats settle at N = 37 within 15 s, with
@@ -553,6 +585,40 @@ TPOT 130 ms. 6.5 and 11 req/s agree with the pilot.
   the 8a result was a session effect (H7b).
 - Note: predictions 8c.2 and 8d.1 assumed the fast branch at 9 req/s. They
   stay as written; their results will be read with A7.
+
+Results of E7 (2026-10-18; `runs/methodology_review/task8/e7-7tok/`, `e7-8tok/`,
+same server session, commit `f1851b7`; both runs PASS):
+
+| 9 req/s, uniform | 7-token prompt | 8-token prompt (control) |
+|---|---:|---:|
+| N, 15–115 s | 20–21 | 36–38 |
+| TPOT p50 | 129 ms | 235 ms |
+| E2E p50 / p95 | 2.27 / 2.34 s | 4.13 / 4.25 s |
+| Server tokens per step (decode + prompt) | 26.3 (18.3 + 8.0) | 48.4 (32.3 + 16.1) |
+| Served; medium attainment | 9.00 req/s; 100% | 9.01 req/s; 100% |
+
+| # | Result | Status |
+|---|---|---|
+| E7.1 | 7-token run: N 20, TPOT 129 ms (≤ 25 and ≤ 150 ms). | HELD |
+| E7.2 | 8-token control: N 38 (≥ 30). | HELD |
+
+Reading: H7a holds; H7b (session effect) is false, because the control in the
+same session returns to N = 38. The 7-token run is the same as the pilot
+(N 20, TPOT 130 ms, E2E p50 2.27 s). With 7 tokens a step carries 26 tokens,
+inside one 32-row block; with 8 tokens the system settles at 48 tokens per
+step, two blocks. Both are self-consistent: at 9 req/s and a 129 ms step,
+1.2 requests arrive per step (8 prompt tokens); at a 235 ms step, 2.1 arrive
+(16 prompt tokens). One more prompt token makes E2E 82% longer at the same
+rate. A7 is resolved; it is a property of this Metal stack (Task 6) and of
+the workload, not a harness fault.
+
+Consequences for the predictions not yet run (note written 11:43 UTC, before 8c and
+8d; the original predictions stay as written):
+- 8c.2 compares Poisson with uniform at 9 req/s. Uniform at 9 req/s is on the
+  slow branch (E2E p95 4.25 s), so the comparison is between slow-branch runs.
+- 8d.1 expected the cap of 32 to do nothing at 9 req/s. With the 8-token
+  prompt about 37 requests run at 9 req/s, so the cap is active. 8d.1 is now
+  expected not to hold. What the cap does at 9 req/s is not predicted.
 
 Slide claims and the prediction that tests each:
 
@@ -1469,3 +1535,24 @@ server ran):
 
 Next. User: commit, restart, then the session steps ("Task 8 run plan").
 Agent: analyse each set when the user reports it.
+
+### Step 8a: Same-session uniform baseline (2026-10-18)
+
+Owner: User ran 8a and the 8a re-run; Agent analysed.
+
+Done: 8a (closed 16/32/64; open uniform 6.5–16.5 req/s × 2, 120 s). Found that
+satlab capped itself at 246 requests in flight (threat 19), fixed it
+(`ensure_file_limit`, commit `f1851b7`), and re-ran 13–16.5 req/s.
+
+Run, measured, calculated: `run.sh 8a`, `run.sh 8a-overload`; values in
+"Results of 8a" and "Results of the 8a re-run". Contract checks pass for all
+runs (`analysis/analyze.py`).
+
+Result: 9 of 10 predictions held (8a.8, the wire check, is still to run).
+8a.4 did not hold at 9 req/s: the backlog settled at 37, not 13–30 (A7). The
+capacity is 12 req/s, overload grows the backlog at offered − 12 per second,
+and `waiting` shows the queue only after about 245 requests are in the batch.
+
+Unknown: why the `running` gauge stops at about 245. (A7: resolved by E7, H7a.)
+
+Next. User: `run.sh e7`. Agent: compare E7 with E7.1 and E7.2.
