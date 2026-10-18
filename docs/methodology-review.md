@@ -864,6 +864,54 @@ written):
 - 8e.2 is judged at 9 and 11 req/s. At 12 req/s the two 8c runs differ by
   1.7× in TPOT, so the 12 req/s value is only reported.
 
+### Task 8: 8e, second client
+
+Results of 8e (2026-10-18, 13:26–13:33 UTC; `runs/methodology_review/task8/8e/`,
+`vllm bench serve` 0.30.0, Poisson, notes committed in `2f503c5`). All
+requests completed; 0 failed. From `/metrics`: 8.0 prompt tokens and 16.0
+output tokens per request at every rate, as with satlab. The satlab reference
+is the mean of the two 8c runs at the same rate, without the warmup period
+(rule set before the 11 req/s result was read).
+
+| | 9: bench | 9: satlab | 11: bench | 11: satlab | 12: bench | 12: satlab r1 / r2 |
+|---|---:|---:|---:|---:|---:|---:|
+| Throughput, req/s | 8.85 | 8.73–8.79 | 10.63 | 10.51–10.57 | 11.33 | 11.67 / 11.11 |
+| Mean TPOT, ms | 230.6 | 225.2 | 474.8 | 458.7 | 743 | 1113 / 685 |
+| Median ITL, ms | 234.6 | 234.5 | 465.7 | 461.6 | 779 | 1214 / 686 |
+| Mean TTFT, ms | 631 | 615 | 1244 | 1223 | 1940 | 3287 / 1823 |
+| Mean E2E, s | 4.09 | 3.99 | 8.37 | 8.10 | 13.1 | 20.0 / 12.1 |
+| GPU clock minimum, MHz | 1543 | | 1528 | | 1540 | |
+
+| # | Result | Status |
+|---|---|---|
+| 8e.1 | 8.85 and 10.63 req/s: −1.7% and −3.4% of offered (within 5%). | HELD |
+| 8e.2 | 9 req/s: TPOT +2.4%, ITL +0.1%, TTFT +2.6%. 11 req/s: TPOT +3.5%, ITL +0.9%, TTFT +1.8%. | HELD |
+| 8e.3 | Mean E2E at 12 req/s is 3.20× the value at 9 (≥ 3). | HELD, small margin |
+
+Reading: a second, independent client agrees with satlab within 4% on every
+latency metric at 9 and 11 req/s. At 12 req/s its values fall between the two
+satlab runs, as expected at the edge of capacity. The benchmark throughput is
+completed requests divided by a duration that includes the drain after the
+last send, so it reads 1.7–3.4% below the offered rate by its definition.
+
+Notes for 8d (written 2026-10-18, 13:34 UTC, before 8d; 8d.1–8d.4 stay as
+written):
+- The 8a closed run with 32 workers made 192 tok/s, not the 181 of Task 6:
+  its steps carry 32 decode tokens in 114 ms, and all 32 workers send their
+  next prompt together, so the prompts go in one separate prefill step
+  (server prefill mean 891 ms). The requests move as one convoy.
+- 8d.5 (new): above capacity, with `waiting` > 0, the capped server runs in
+  one of two patterns, and the engine steps show which one. Staggered: each
+  step carries about 30 decode tokens and about 2 new prompts (about 46 rows,
+  two blocks, about 235 ms), served about 8.5 req/s. Convoy: 16 steps of 32
+  decode tokens (about 114 ms) and one prefill step of 32 prompts, served
+  about 12 req/s, as in the closed run. At 13 and 16.5 req/s the served rate
+  is within 10% of the value of the pattern that the steps show.
+- 8d.1: at 9 req/s two outcomes are possible. On the fast branch (N about 20)
+  the cap does nothing. On the slow branch (N about 37 uncapped) the cap
+  binds; in the staggered pattern capacity is about 8.5 req/s, so `waiting`
+  grows.
+
 ## Workload: real traffic against our test
 
 Question: how far is our test workload (uniform or Poisson arrivals, 8 prompt
@@ -1851,3 +1899,19 @@ Unknown: none new.
 
 Next. User: commit, then `run.sh 8e`. Agent: check the prompt length, then
 compare with 8e.1–8e.3.
+
+### Step 8e: Second client (2026-10-18)
+
+Owner: User ran `run.sh 8e`; Agent analysed.
+
+Done: 8e at 9, 11 and 12 req/s with `vllm bench serve`. Checked the prompt
+length from `/metrics`. Compared with 8e.1–8e.3. Wrote 8d.5 before 8d.
+
+Result: 8e.1, 8e.2 and 8e.3 held. A second client agrees with satlab within
+4% on TPOT, ITL and TTFT at 9 and 11 req/s. With 8a.7 (server) and 8a.8
+(wire), the three independent checks of the numbers all hold.
+
+Unknown: none new.
+
+Next. User: commit; stop the server; start it with `--max-num-seqs 32`
+logged to `server-32.log`; `run.sh 8d`. Agent: compare with 8d.1–8d.5.
