@@ -313,4 +313,23 @@ mod tests {
         assert!((mean / 20_000_000.0 - 1.0).abs() < 0.03, "mean gap {mean}");
         assert!((var.sqrt() / mean / 2.0 - 1.0).abs() < 0.05, "cv {}", var.sqrt() / mean);
     }
+
+    #[test]
+    fn gamma_counts_spread_across_seeds_like_a_renewal_process() {
+        // 9 req/s, cv 2, arrivals in 30-120 s: mean 810, sd sqrt(810 * cv²) = 57.
+        let cfg = test_cfg(9.0, Arrival::Gamma { cv: 2.0 });
+        let counts: Vec<f64> = (0..2000u64)
+            .map(|k| {
+                let mut sched = ArrivalSchedule::new(&cfg, 120_000_000_000, 153_688_000 + k * 1000);
+                std::iter::from_fn(|| sched.next_intended())
+                    .filter(|&t| t >= 30_000_000_000)
+                    .count() as f64
+            })
+            .collect();
+        let mean = counts.iter().sum::<f64>() / counts.len() as f64;
+        let sd =
+            (counts.iter().map(|c| (c - mean).powi(2)).sum::<f64>() / counts.len() as f64).sqrt();
+        assert!((mean / 810.0 - 1.0).abs() < 0.02, "mean count {mean}");
+        assert!((sd / 57.0 - 1.0).abs() < 0.1, "sd of count {sd}");
+    }
 }

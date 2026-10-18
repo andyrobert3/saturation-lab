@@ -804,6 +804,66 @@ Notes for 8c-gamma (written 2026-10-18, 12:49 UTC, before 8c-gamma; 8c.5 and
   ≤ Poisson is close to certain at this floor; the E2E p95 part is the real
   test.
 
+### Task 8: 8c-gamma, gamma CV 2 arrivals
+
+Results of 8c-gamma (2026-10-18, 13:01–13:10 UTC;
+`runs/methodology_review/task8/8c-gamma/`, commit `f1851b7`, notes committed in
+`62dd327` at 13:01:27 UTC; all 4 runs PASS).
+
+| Gamma CV 2, 120 s | 9 r1 | 9 r2 | 11 r1 | 11 r2 |
+|---|---:|---:|---:|---:|
+| Gap CV (plan = sent ± 0.002) | 1.89 | 2.08 | 2.00 | 1.94 |
+| Offered in 30–120 s, req/s | 8.47 | **11.02** | 10.87 | 11.06 |
+| TPOT p50, ms | 239 | 604 | 461 | 847 |
+| E2E p50 / p95, s | 4.30 / 7.69 | 10.6 / 16.2 | 8.31 / 12.9 | 15.2 / 19.5 |
+| Medium attainment | 73.4% | 13.2% | 23.4% | 3.6% |
+| GPU clock minimum | 1538 MHz | 1576 MHz | 1520 MHz | 1576 MHz |
+
+| # | Result | Status |
+|---|---|---|
+| 8c.5 | Attainment 73.4% and 13.2% (≥ 95%). E2E p95 1.82× uniform in r1 (1.1–2.0), 3.85× in r2. | NOT HELD |
+| 8c.6 | E2E p95 12.9 and 19.5 s against Poisson 9.7 and 10.3 s: HELD. Attainment 23.4% and 3.6% against Poisson 0% and 7.4%: r1 is above both Poisson runs. | NOT HELD (attainment); p95 part held |
+
+The note before 8c-gamma said that the attainment part of 8c.6 was close to
+certain. That was wrong.
+
+Checks on the gamma schedules:
+- The sender is not the cause: sent CV equals plan CV within 0.002.
+- The planned gaps fit Gamma(shape 0.25, mean 1/λ): two-sample KS against
+  200,000 simulated gaps, p = 0.08–0.56.
+- 9 r2 drew a rare schedule: 11.02 req/s in 30–120 s at λ = 9. In 20,000
+  simulated schedules, 0.07% reach this. New unit test
+  `gamma_counts_spread_across_seeds_like_a_renewal_process`
+  (`src/driver.rs`): over 2,000 seeds, the satlab count in 30–120 s has
+  mean 810 within 2% and SD 57 within 10%. Thus the satlab code spreads
+  across seeds as theory says, and 9 r2 is a tail draw, not a fault.
+- At CV 2, one 120 s run does not fix the rate: the 90 s window rate has
+  p5–p95 of 8.0–10.0 req/s at λ = 9 and 9.9–12.2 at λ = 11. The SD of the
+  window rate is √(λ·CV²/T); for 2% at λ = 9 a run needs T = CV²/(λ·0.02²),
+  about 1,100 s at CV 2 and 280 s for Poisson.
+
+Reading:
+- The tail ordering holds at 11 req/s: E2E p95 4.4 s (uniform, fast branch),
+  9.7–10.3 s (Poisson), 12.9–19.5 s (gamma CV 2).
+- Attainment does not follow the same order. Gamma has long quiet periods:
+  in 11 r1, 15–45 s carried 24–27 tokens per 156–159 ms step (the one-block
+  branch), and the requests in that period pass. The failures come in the
+  bursts. Within 120 s, where the bursts fall decides the share that passes.
+- 9 r1 (offered 8.47) is the fair 9 req/s run: 73.4% attainment, p95 1.82×
+  uniform. Even at 9 req/s, gamma CV 2 bursts are not absorbed.
+
+Notes for 8e (written 2026-10-18, 13:17 UTC, before 8e; 8e.1–8e.3 stay as
+written):
+- Prompt length. `vllm bench serve --random-input-len 8` sends 7 random
+  tokens and the server adds BOS (`num_special_tokens_to_add`,
+  `vllm/benchmarks/datasets/datasets.py:604`), so the server sees 8 tokens,
+  as with satlab. Decode and re-encode can change the length by a token. A7
+  shows that one token changes the branch, so the check is the mean prompt
+  tokens per request from `bench-<r>-before/after.prom`: it must be 8.0. If
+  not, 8e.2 compares different workloads.
+- 8e.2 is judged at 9 and 11 req/s. At 12 req/s the two 8c runs differ by
+  1.7× in TPOT, so the 12 req/s value is only reported.
+
 ## Workload: real traffic against our test
 
 Question: how far is our test workload (uniform or Poisson arrivals, 8 prompt
@@ -1773,3 +1833,21 @@ move the server through the 32-row block states, in both directions.
 Unknown: none new.
 
 Next. User: commit, then `run.sh 8c-gamma`. Agent: compare with 8c.5 and 8c.6.
+
+### Step 8c-gamma: Gamma CV 2 arrivals (2026-10-18)
+
+Owner: User ran `run.sh 8c-gamma`; Agent analysed.
+
+Done: 8c-gamma at 9 and 11 req/s × 2. Compared with 8c.5 and 8c.6. Checked
+the gamma schedules (sent against plan, KS test, rate spread). Added a unit
+test for the spread of the schedule across seeds.
+
+Result: 8c.5 did not hold; 8c.6 held for E2E p95 and did not hold for
+attainment. Burstier arrivals give a longer tail at 11 req/s (p95: uniform
+4.4 s, Poisson 10 s, gamma 13–20 s). At CV 2 a 120 s run does not fix the
+offered rate (one 9 req/s run drew 11.0 req/s).
+
+Unknown: none new.
+
+Next. User: commit, then `run.sh 8e`. Agent: check the prompt length, then
+compare with 8e.1–8e.3.
