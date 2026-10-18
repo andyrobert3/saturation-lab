@@ -699,6 +699,53 @@ written):
   level before the run ends. If N grows with no clock dip before it, the
   trigger in H8a is wrong.
 
+Results of 8b (2026-10-18, 11:57–12:12 UTC; `runs/methodology_review/task8/8b/`,
+commit `f1851b7`, the predictions committed in `dd814ee` at 11:56:55 UTC; all 3
+runs PASS). Slope and served are over 150–300 s.
+
+| Uniform, 300 s | 11 req/s | 12 req/s | 13 req/s |
+|---|---:|---:|---:|
+| Slope of N, per s | −0.008 | 0.000 | +0.787 |
+| N at 60 / 150 / 295 s | 47 / 66 / 64 | 123 / 120 / 118 | 261 / 342 / 448 |
+| Served, req/s | 10.99 | 11.98 | 12.24 |
+| TPOT p50; E2E p50 / p95 | 346 ms; 6.07 / 6.29 s | 571 ms; 10.0 / 10.3 s | 1235 ms; 29.3 / 35.5 s |
+| Medium attainment | 7.4% | 0% | 0% |
+| GPU clock | dip 71–225 s, minimum 1542 MHz | 1576–1577 MHz | 1576–1577 MHz |
+
+| # | Result | Status |
+|---|---|---|
+| 8b.1 | Slope −0.008 (within ±0.1), but medium attainment 7.4% (≥ 95% predicted). | NOT HELD |
+| 8b.2 | Slope 0.000; N 118–123. The GPU clock stayed at full speed. | HELD |
+| 8b.3 | Slope +0.787 (≥ +0.5); served 12.24 (10.5–13.0). | HELD |
+| 8b.4 | N at 12 req/s did not grow, so the condition did not occur. | NOT TESTED |
+
+Reading: 11 req/s moved to a slower branch, the same way as 12 req/s in
+8a-wire. The run held 43 tokens per 243 ms step to 77 s (as in 8a: N 47,
+E2E p95 4.36 s, 100% attainment). The GPU clock fell from 1576 MHz at 71 s to
+1560 MHz at 77 s (−1%). At 77.6 s the step went from 247 to 335 ms (+88 ms,
+one 32-row block) with 43 tokens. The batch then grew to 61 tokens per 345 ms
+step and stayed there. The clock was back at 1577 MHz from 225 s, but the
+system did not return: the slower branch is also self-consistent at
+11 req/s (served 10.99), so nothing pulls it back. This is the H8a pattern
+(dip, block step, no return) at 11 req/s. The minimum clock in the 15 s before
+the step was 1560 MHz, at the 8b.4 threshold; 8b.4 was written for 12 req/s
+only, so this is support, not a test.
+
+At 11 req/s the fast branch carries about 43 decode + 21 prompt = 64 rows per
+step, exactly two 32-row blocks; a 1% slower step is enough to go over. At
+12 req/s it carries 110 + 55 = 165 rows, inside six blocks (192), and it held
+for 300 s at full clock.
+
+Notes for 8c (written 2026-10-18, 12:20 UTC, before 8c; 8c.1–8c.6 stay as
+written):
+- Uniform at 11 req/s now has two results: the fast branch (8a, 2 runs:
+  E2E p95 4.36 s, attainment 100%) and the slow branch (8b: 6.29 s, 7.4%).
+  8c.3 and 8c.6 compare with the 8a runs, which have the same 120 s length.
+  The results will also give the ratio against the 8b run.
+- The main slide claim ("uniform passes, Poisson fails at 11 req/s") holds
+  only for uniform on the fast branch. Even uniform arrivals fail the medium
+  tier at 11 req/s in 1 of 3 runs.
+
 ## Workload: real traffic against our test
 
 Question: how far is our test workload (uniform or Poisson arrivals, 8 prompt
@@ -1636,3 +1683,19 @@ into overload after a 2.5% GPU clock dip (A8): the capacity margin at
 Unknown: why 130–210 tokens per step make fewer tok/s than 110 or 240.
 
 Next. User: commit, then `run.sh 8b`. Agent: compare with 8b.1–8b.4.
+
+### Step 8b: Long uniform runs (2026-10-18)
+
+Owner: User ran `run.sh 8b`; Agent analysed.
+
+Done: 8b at 11, 12 and 13 req/s, 300 s each. Compared with 8b.1–8b.4.
+
+Result: 8b.2 and 8b.3 held; 8b.1 did not hold; 8b.4 was not tested (12 req/s
+stayed stable at full clock). 11 req/s moved to a slower branch after a 1%
+GPU clock dip and stayed there after the clock recovered (E2E p50 6.07 s
+against 4.25 s). Capacity: 12 req/s holds at full clock; 11 req/s can still
+fail the medium tier.
+
+Unknown: why 130–210 tokens per step make fewer tok/s than 110 or 240.
+
+Next. User: commit, then `run.sh 8c`. Agent: compare with 8c.1–8c.4.
