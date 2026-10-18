@@ -140,6 +140,7 @@ RESOLVED = the pilot data shows no problem.
 | 17 | Internal | Network reads bunch token events, so the timestamps are wrong. | TPOT, ITL. | 0% of 42,000 gaps below 1 ms in four sample runs (6.5, 12, 16.5 req/s open; 32 workers closed). Each event carries one token. | — | RESOLVED for the pilot |
 | 18 | Internal | Records are lost or clipped. | All values. | 0 clipped, 0 dropped; all 54 runs pass the contract checks (Step 2). | — | RESOLVED for the pilot |
 | 19 | Internal | A client resource limit caps the load: macOS gives a shell 256 open files, so at most 246 requests are in flight and the rest fail at once with HTTP status 0. | Any overload result: served rate, backlog growth, `waiting`. | Task 8a: 13–16.5 req/s runs capped at 246 in flight, 5–27% errors. | satlab raises its open-file limit at start or stops (`ensure_file_limit`). Re-run (`8a-overload`). | RESOLVED (fix); the pilot passed with 437 in flight, so its shell had a higher limit. |
+| 20 | Internal | The GPU clock dips 2–4% during a session while thermal pressure stays Nominal. | Any result at the edge of capacity (12 req/s). | Task 8: minimum 1506–1552 MHz in 9 of 27 runs, 1575–1577 MHz in the rest; the 8a-wire run at 12 req/s went into overload after a dip (A8). | Record the GPU clock in every run (`powermetrics`); state capacity with its margin. | OPEN (recorded, not controlled) |
 
 Claims in `talk.md` that change because of this review:
 - "Overload lowers throughput" is not supported (threat 1).
@@ -633,6 +634,70 @@ Slide claims and the prediction that tests each:
 | A batch cap makes the queue visible and bounds TPOT, but costs throughput. | 8d.2, 8d.3 |
 | Closed and open load give different answers on the same server. | 8a.10 |
 | The numbers are right: wire, server and a second client agree. | 8a.7, 8a.8, 8e.2 |
+
+### Task 8: 8a-wire and anomaly A8
+
+Results of 8a-wire (2026-10-18, 11:46–11:48 UTC; `runs/methodology_review/task8/8a-wire/`
+and `wire-12.pcap`, commit `f1851b7`; the run PASS). `tcpdump -i lo0 -s 200
+'tcp dst port 8000'` ran during the run. `analysis/wire.py` takes the first
+segment of each request (payload starts with `POST`) and matches it in order to
+the plan.
+
+| Wire check, 12 req/s uniform | p1 / p50 / p99 |
+|---|---:|
+| Gap between POSTs, ms (plan 83.33) | 81.65 / 83.32 / 85.15 |
+| Wire time − planned time, ms | 1.36 / 2.74 / 4.52 |
+| Wire time − satlab send time, ms | 0.17 / 0.68 / 1.99 |
+
+| # | Result | Status |
+|---|---|---|
+| 8a.8 | 1440 POSTs on the wire for 1440 requests; 99.03% of gaps within 2 ms of 83.33 ms. | HELD, small margin |
+
+Reading: each request reaches the wire 2.7 ms (median) after its planned time,
+and the delay is nearly constant, so the wire rate is the planned rate. The
+wire is 0.7 ms (median) after satlab's own send time: the request build and
+the TCP connect, which satlab cannot see. The total delay at p99 (4.5 ms) is
+inside the send-lag budget (8.3 ms, 10% of the gap).
+
+Anomaly A8: the same 12 req/s run went into overload. The two 8a runs at
+12 req/s served 11.79 and 11.97 req/s with N flat at 117–136. 8a-wire served
+10.98 req/s; N grew from 122 at 30 s to 214 at 120 s (+1.16/s); E2E p50
+12.7 s against 10.0 s. Engine steps (stream events, 3 ms grouping) and
+`powermetrics` show the sequence:
+
+| Time in run | GPU clock | Tokens per step | Step time |
+|---|---|---:|---|
+| 30–56 s | 1577 MHz | 110 | 572 ms (192 tok/s) |
+| 56–66 s | 1577 → 1537 MHz | 110–111 | 572 → 584 ms |
+| 66.9 s | 1537 MHz | 111 | 584 → 671 ms (+87 ms) |
+| 76.5 s | 1532 MHz | 127 | 698 → 795 ms (+98 ms) |
+| 105–120 s | 1529 MHz | 181 (median) | 1020 ms (170 tok/s) |
+
+- H8a: 12 req/s is at the edge of capacity. On the fast branch the server
+  makes 110 tokens per 572 ms step (192.3 tok/s); 12 req/s needs 192 tok/s,
+  a margin of about 0.2%. A GPU clock dip of 2.5% removes the margin. The
+  backlog grows by a few requests, a step goes over a 32-row block boundary
+  (+87 ms, the block cost of Task 6 and A7), more requests arrive in each
+  longer step, and the system moves to slower branches. With 130–210 tokens
+  per step the server makes about 170–185 tok/s (also at 13 req/s, 30–60 s,
+  at full clock; the reason is not known), so the backlog keeps growing. This
+  is A7 at 12 req/s with a different trigger.
+- H8b: `tcpdump` caused the slowdown. Against it: CPU power stays 0.4–0.7 W,
+  as in the other runs, and the same clock dips (minimum 1506–1552 MHz) occur
+  in runs without `tcpdump` (8a-closed, 8a-overload at 13 req/s, e7). The two
+  8a runs at 12 req/s had no dip (1575–1577 MHz).
+- Thermal pressure is Nominal in every sample. "Pressure Nominal" does not
+  mean a constant clock (threat 20).
+
+Notes for 8b (written 2026-10-18, 11:54 UTC, before 8b; 8b.1–8b.3 stay as
+written):
+- 8b.2 (12 req/s stable for 300 s) can hold only if the GPU clock stays at
+  about 1577 MHz for the full run.
+- 8b.4 (H8a): if N at 12 req/s starts to grow (slope over the next 30 s
+  > +0.5/s), a GPU clock dip below 1560 MHz comes in the 15 s before the first
+  step-time increase of more than 50 ms, and N does not return to its earlier
+  level before the run ends. If N grows with no clock dip before it, the
+  trigger in H8a is wrong.
 
 ## Workload: real traffic against our test
 
@@ -1556,3 +1621,18 @@ and `waiting` shows the queue only after about 245 requests are in the batch.
 Unknown: why the `running` gauge stops at about 245. (A7: resolved by E7, H7a.)
 
 Next. User: `run.sh e7`. Agent: compare E7 with E7.1 and E7.2.
+
+### Step 8a-wire: E7 and the wire check (2026-10-18)
+
+Owner: User ran `run.sh e7` and `run.sh 8a-wire` with `tcpdump`; Agent analysed.
+
+Done: E7 (results under "Task 8: E7"). 8a-wire: wrote `analysis/wire.py` and
+checked 8a.8. Found A8 and threat 20; wrote 8b.4 before 8b.
+
+Result: E7.1, E7.2 and 8a.8 held. A7 is resolved (H7a). The 12 req/s run went
+into overload after a 2.5% GPU clock dip (A8): the capacity margin at
+12 req/s is about 0.2%.
+
+Unknown: why 130–210 tokens per step make fewer tok/s than 110 or 240.
+
+Next. User: commit, then `run.sh 8b`. Agent: compare with 8b.1–8b.4.
