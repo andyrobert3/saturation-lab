@@ -24,6 +24,45 @@ for production. UNKNOWN = the data cannot answer it.
 | 7 | How do you know the system is in steady state? | It was not tested before measurement. Warmup is a fixed 10 s, runs are 60 s, 3 repeats. From the records: at 6.5–11 req/s unfinished work is flat from 10 s. At 12 req/s it rises from 61 (at 10 s) to 96 (at 60 s); the slope is +0.44/s over 10–60 s but −0.01/s over 35–60 s, so it levels off near 30 s. The 12 req/s window therefore contains a transient, and its served rate (11.3 req/s) can be partly a warmup effect. From 12.5 req/s the backlog still grows over 35–60 s. | `records.csv` `actual_ns`, `completed_ns` (table in Step 1) | PARTIAL |
 | 8 | Environment | vLLM 0.30.0 (reported by the server). vllm-metal 0.30.0 (installed today). Model `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit`, revision not pinned. Apple M4 Pro, 64 GB, macOS 26.5.2 (read today, not at run time). Launch flags: recorded for the open sweep (`--max-model-len 8192 --gpu-memory-utilization 0.60`), not recorded for the closed sweep. `max_num_seqs`: not set in the launch command; the API-server default on this Mac is 256 (`vllm/engine/arg_utils.py:2756`; the class default 128 in `vllm/config/scheduler.py:44` does not apply), which agrees with the 246 running requests observed (A3). Model snapshot on disk: `241a666dad6cb93c8ff213d39a7f34a36bf26db4`, the only one. Cache setting, power state and harness revision (`git_sha` "unknown" in all 54 runs) are not known. The closed sweep ran on 2026-09-28 and the open sweep on 2026-10-11: different sessions, 13 days apart. Closed runs ran in ascending concurrency with repeats back to back; open runs used forward, reverse and shuffled passes. | `config.json` `target_notes`, `provenance`; `server_metrics.csv` `running`; Homebrew Cellar | PARTIAL (cache, power, the revision at run time and closed-sweep flags cannot be recovered; the user has no server log) |
 
+## Why this model
+
+The model is `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit`, revision
+`241a666dad6cb93c8ff213d39a7f34a36bf26db4`: a dense decoder with 32 layers,
+hidden size 4096, 32 query heads and 8 KV heads (GQA), a vocabulary of 128,256
+tokens, 4-bit weights (group 64), 4.2 GiB on disk (local `config.json`).
+It was chosen as a small, standard model that fits the Mac mini. The data
+supports these reasons to keep it:
+
+1. It is a fixture, not the subject. The talk is about the method; a plain,
+   well-known model keeps the attention on the method.
+2. It is dense, not mixture-of-experts. Each token uses all the weights, so the
+   cost of a step depends only on the number of tokens in it. The prediction
+   "one weight read per step at batch 1, 16.5 ms" gave 16.8 ms (E1). With
+   expert routing, the service time would change from token to token.
+3. The model is fast alone: 19 ms per token in pure MLX (E1). What is slow
+   comes from the system around it: the queue, the batch and the serving
+   layer (64 ms in MLX against 160 ms in vllm-metal at batch 8, Task 6).
+4. Memory is never the limit: 4.2 GiB of weights and KV-cache use ≤ 2.6%. The
+   knee comes from compute and scheduling only, one cause at a time.
+5. The weights are open and the revision is pinned, so anyone can repeat the
+   runs on a Mac with 16 GB or more.
+
+Limits to state before someone asks:
+
+1. The 4-bit kernels shape the step-time curve (32-row blocks; the jump at
+   12–14 tokens in vllm-metal). An fp16 model or a CUDA server gives a
+   different curve (threat 2). An optional check: E1 on an 8-bit copy of the
+   model (pure MLX, about 5 minutes, no server).
+2. A small model with short requests. Production chat uses larger models,
+   prompts of about 1,000 tokens (Task 5) and KV-cache pressure; this test
+   never reaches the KV-memory limit (threat 11).
+3. An older model generation (July 2024). The queueing behaviour depends on
+   the architecture class (dense GQA decoder), not on the generation.
+
+Answer for the talk: "A plain, dense, open 8B model is the most boring choice
+I could make. It runs fast alone on a Mac, so everything slow that you will see
+comes from the system around it, not from the model."
+
 ## How the harness and the mock work (verified 2026-10-17)
 
 Read from the code and checked against saved runs.
