@@ -746,6 +746,64 @@ written):
   only for uniform on the fast branch. Even uniform arrivals fail the medium
   tier at 11 req/s in 1 of 3 runs.
 
+### Task 8: 8c, Poisson arrivals
+
+Results of 8c (2026-10-18, 12:31–12:43 UTC; `runs/methodology_review/task8/8c/`,
+commit `f1851b7`, notes committed in `409e5bd` at 12:30:36 UTC; all 6 runs
+PASS). Uniform references: 8a (120 s) and, at 11 req/s, also 8b.
+
+| Poisson, 120 s | 9 r1 | 9 r2 | 11 r1 | 11 r2 | 12 r1 | 12 r2 |
+|---|---:|---:|---:|---:|---:|---:|
+| Gap CV (plan = sent ± 0.001) | 1.019 | 1.039 | 1.086 | 0.988 | 0.971 | 1.002 |
+| Index of dispersion, 1 s | 0.85 | 1.15 | 1.19 | 0.79 | 0.98 | 0.95 |
+| Offered in 30–120 s, req/s | 9.02 | 8.91 | 11.02 | 10.60 | 11.94 | 11.60 |
+| Served, req/s | 9.00 | 8.86 | 10.70 | 10.87 | 11.74 | 11.08 |
+| TPOT p50, ms | 239 | 224 | 485 | 466 | 1217 | 703 |
+| E2E p50 / p95, s | 4.24 / 4.93 | 3.99 / 5.40 | 8.59 / 10.32 | 8.30 / 9.70 | 21.5 / 23.2 | 12.3 / 13.7 |
+| Medium attainment | 96.3% | 89.5% | 0% | 7.4% | 0% | 0% |
+| Uniform E2E p95; medium attainment | 4.22 s; 100% | | 4.36 s (8b: 6.29 s); 100% (8b: 7.4%) | | 10.3–10.6 s; 0% | |
+
+| # | Result | Status |
+|---|---|---|
+| 8c.1 | IDC 0.79–1.19 (0.6–1.4). CV 0.971–1.039 in 5 runs; 1.086 in 11 r1. | NOT HELD (1 of 6) |
+| 8c.2 | E2E p95 1.17× and 1.28× uniform (≤ 1.3). Medium attainment 96.3% and 89.5% (≥ 95%). | NOT HELD (r2 attainment) |
+| 8c.3 | E2E p95 2.37× and 2.22× the 8a uniform (1.64× and 1.54× the 8b run); attainment 0% and 7.4% against 100%. | HELD |
+| 8c.4 | Attainment 0% for both; Poisson p95 13.7–23.2 s against 10.3–10.6 s. | HELD |
+
+On 8c.1: the sender is not the cause; the sent CV equals the plan CV within
+0.001. The planned gaps fit an exponential with the planned rate (one-sample
+KS, p = 0.06–0.96). The 11 r1 plan has five long gaps (6.8–11.2 × the mean);
+without the longest, CV is 1.057. The band was too narrow: for about 1,300
+exponential gaps, 6.8% of samples fall outside 0.95–1.05 (20,000 simulated
+schedules), so one of six runs outside was 35% likely. A CV of ≥ 1.086 is
+rarer (0.2% per run). The schedule code is the inverse transform
+(`-ln(u)/λ`, `src/driver.rs`). Use simulated bands for such checks.
+
+Reading:
+- At 11 req/s the main claim holds: uniform on the fast branch passes the
+  medium tier (100%), Poisson at the same mean rate fails (0–7%), with
+  E2E p95 2.2–2.4× higher. Against the slow uniform branch (8b) Poisson is
+  still 1.5–1.6× worse.
+- Poisson does not settle on one branch. Bursts move the step through more
+  32-row blocks: at 11 req/s, 15 s windows go from 44 to 99 tokens per step
+  (248–561 ms). At 9 req/s the step also falls to the one-block branch
+  (18–21 tokens, 146–160 ms) in quiet periods, so the Poisson E2E p50 of r2
+  (3.99 s) is below uniform (4.11 s) while its p95 is higher.
+- At 12 req/s two Poisson runs differ by 1.7× in TPOT (1217 against 703 ms):
+  at the edge of capacity the random schedule decides the result. 12 r1
+  reached the batch limit of about 240 for 45 s.
+- The GPU clock dipped in 9 r1 and 11 r1 (minimum 1550–1553 MHz) and stayed at
+  1575–1577 MHz in the other four. 11 r2 fails with no dip, so the clock is
+  not the cause of the 11 req/s result.
+
+Notes for 8c-gamma (written 2026-10-18, 12:49 UTC, before 8c-gamma; 8c.5 and
+8c.6 stay as written):
+- 8c.5 predicts gamma medium attainment ≥ 95% at 9 req/s. Poisson at 9 req/s
+  already gave 89.5% in one run, so this part is expected not to hold.
+- 8c.6 compares with Poisson at 11 req/s (0% and 7.4%). Gamma attainment
+  ≤ Poisson is close to certain at this floor; the E2E p95 part is the real
+  test.
+
 ## Workload: real traffic against our test
 
 Question: how far is our test workload (uniform or Poisson arrivals, 8 prompt
@@ -1699,3 +1757,19 @@ fail the medium tier.
 Unknown: why 130–210 tokens per step make fewer tok/s than 110 or 240.
 
 Next. User: commit, then `run.sh 8c`. Agent: compare with 8c.1–8c.4.
+
+### Step 8c: Poisson arrivals (2026-10-18)
+
+Owner: User ran `run.sh 8c`; Agent analysed.
+
+Done: 8c at 9, 11 and 12 req/s × 2. Compared with 8c.1–8c.4. Checked the
+Poisson schedules (sent against plan, KS test, simulated CV band).
+
+Result: 8c.3 (the main slide claim) and 8c.4 held. 8c.1 did not hold in 1 of
+6 runs (CV 1.086); the cause is a band that was too narrow, not the generator.
+8c.2 did not hold: one 9 req/s run had 89.5% medium attainment. Poisson bursts
+move the server through the 32-row block states, in both directions.
+
+Unknown: none new.
+
+Next. User: commit, then `run.sh 8c-gamma`. Agent: compare with 8c.5 and 8c.6.
