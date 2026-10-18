@@ -912,6 +912,49 @@ written):
   binds; in the staggered pattern capacity is about 8.5 req/s, so `waiting`
   grows.
 
+### Task 8: 8d, batch cap of 32
+
+Results of 8d (2026-10-18, 13:37–13:50 UTC; `runs/methodology_review/task8/8d/`,
+server restarted with `--max-num-seqs 32` (`server-32.log`), commit `f1851b7`,
+8d.5 committed in `af08c53` at 13:36:24 UTC; all 5 runs PASS). Uniform
+arrivals, 120 s.
+
+| Capped at 32 | 9 | 11 | 12 | 13 | 16.5 |
+|---|---:|---:|---:|---:|---:|
+| Served, req/s | 8.34 | 8.33 | 8.31 | 8.59 | 9.44 |
+| Slope of N, per s | +0.67 | +2.66 | +3.66 | +4.41 | +7.06 |
+| `running` max / `waiting` max | 31 / 71 | 31 / 312 | 31 / 432 | 32 / 519 | 32 / 837 |
+| TPOT p50, ms | 227 | 226 | 226 | 219 | 197 |
+| TTFT p50 / p95, s | 5.2 / 8.7 | 23.8 / 37.0 | 32.5 / 50.6 | 38.2 / 59.1 | 55.7 / 86.9 |
+| E2E p50, s | 8.6 | 27.2 | 35.9 | 41.5 | 58.7 |
+| Steps of 226 ms with 30 tokens | 100% | 100% | 100% | 94% | 77% |
+
+Uncapped references (8a, 8a-overload): at 9 req/s served 9.00, E2E p50 4.11 s,
+TTFT p50 0.60 s; at 13 and 16.5 req/s served 11.4–12.0, TPOT 571–1235 ms.
+
+| # | Result | Status |
+|---|---|---|
+| 8d.1 | At 9 req/s the cap binds: served 8.34 (−7%), E2E p50 8.6 s against 4.11 s (+109%). | NOT HELD (expected in the notes) |
+| 8d.2 | `running` ≤ 32; `waiting` > 0 and rising (max 432–837); TPOT p50 197–226 ms (≤ 300); TTFT p95 at 16.5 req/s 86.9 s (≥ 5). | HELD |
+| 8d.3 | Served 8.59 and 9.44 req/s (8.5–11.5), below the uncapped 11.4–12.0. | HELD |
+| 8d.4 | No prediction. 11 req/s is overload: served 8.33, slope +2.66. | — |
+| 8d.5 | 13 req/s: 94% staggered steps, served 8.59 (+1% of 8.5): held. 16.5 req/s: 77% staggered and 23% steps of about 110 ms, served 9.44 (+11% of 8.5, −21% of 12): neither pattern. No convoy formed. | NOT HELD (1 of 2) |
+
+Reading:
+- The cap makes the queue visible and bounds TPOT: `running` stays ≤ 32,
+  `waiting` reaches 837, and TPOT stays at about 226 ms at every rate
+  (uncapped: up to 1235 ms). All the wait moves into TTFT.
+- The cap costs 31% of capacity on this stack: 8.3 req/s against 12. Each
+  step carries about 30 decode tokens and the prompts of about 2 new
+  requests, so it needs two 32-row blocks (226 ms for 30 tokens). Uncapped,
+  the larger batch fills its blocks better.
+- Thus 9 req/s, which passes the medium tier uncapped on the fast branch and
+  stays stable on the slow branch, is overload with the cap: E2E p50 doubles
+  and TTFT p50 goes from 0.6 s to 5.2 s.
+- Open-loop arrivals keep the requests staggered; the convoy of the closed
+  run did not form. At 16.5 req/s 23% of steps take about 110 ms, with
+  about 32 tokens and about 2 new requests each; the reason is not known.
+
 ## Workload: real traffic against our test
 
 Question: how far is our test workload (uniform or Poisson arrivals, 8 prompt
@@ -1915,3 +1958,26 @@ Unknown: none new.
 
 Next. User: commit; stop the server; start it with `--max-num-seqs 32`
 logged to `server-32.log`; `run.sh 8d`. Agent: compare with 8d.1–8d.5.
+
+### Step 8d: Batch cap of 32 (2026-10-18)
+
+Owner: User restarted the server with `--max-num-seqs 32` and ran `run.sh 8d`;
+Agent analysed.
+
+Done: 8d at 9, 11, 12, 13 and 16.5 req/s. Compared with 8d.1–8d.5.
+
+Result: 8d.2 and 8d.3 held; 8d.1 did not hold (as the notes expected); 8d.5
+held at 13 req/s and not at 16.5 req/s. The cap bounds TPOT at about 226 ms
+and makes the queue visible, but it cuts capacity from 12 to 8.3 req/s, so
+9 req/s becomes overload.
+
+Unknown: why 23% of steps at 16.5 req/s (6% at 13) take about 110 ms instead
+of 226 ms.
+
+Task 8 is complete. Predictions tested: 28 (8a 10, E7 2, 8b 3, 8c 6,
+8e 3, 8d 4; not counted: 8b.4, not tested, and 8d.4, no prediction). Held:
+20. Not held: 8 (8a.4, 8b.1, 8c.1, 8c.2, 8c.5, 8c.6, 8d.1, 8d.5), of which
+8c.5 and 8d.1 were expected not to hold in notes written before the run.
+
+Next. User: stop the server, `powermetrics` and `caffeinate`; commit.
+Agent: Task 9, the independent evidence checks.
