@@ -83,20 +83,20 @@ RESOLVED = the pilot data shows no problem.
 | # | Class | Threat | Slide claim at risk | Evidence so far | Test that removes it | Status |
 |---|---|---|---|---|---|---|
 | 1 | Construct, statistical | The 10 s warmup is too short near and above capacity. The batch still grows during the measurement window, so completions lag behind token output. | "Overload lowers throughput: served falls to about 10.2 req/s." "The knee is at 12 req/s, served 11.3." | Served rate in the late window (35–60 s) is about 12 req/s at every rate from 12 to 16.5 req/s (11.96, 11.76, 10.96, 10.92, 11.68, 12.80), and token rate ÷ 16 is 11.8–12.6. In the early window (10–35 s) served is 8.1–10.6 req/s. | 300 s runs at 12 and 13 req/s (8b). Choose the window from the unfinished-work slope, not a fixed 10 s. | CONFIRMED. Capacity is about 12 req/s (about 190 tok/s). Overload does not lower throughput in these runs. |
-| 2 | External | The Metal backend, not the vLLM scheduler, can set the cost of a larger batch. TPOT grows almost in proportion to the batch from 1 to 8 workers, falls at 16, and 32 times the batch gives only 6.6 times the token rate (30 to 197 tok/s). | "The queue is inside the batch" as a general vLLM mechanism. "5.3 ms per admitted request." | Closed-loop TPOT and token rate (Step 1 context table). | Task 6: scheduler and model-runner source, engine log, `powermetrics`, `py-spy`. Run set 8f on CUDA. | OPEN |
+| 2 | External | The Metal backend, not the vLLM scheduler, can set the cost of a larger batch. TPOT grows almost in proportion to the batch from 1 to 8 workers, falls at 16, and 32 times the batch gives only 6.6 times the token rate (30 to 197 tok/s). | "The queue is inside the batch" as a general vLLM mechanism. "5.3 ms per admitted request." | Closed-loop TPOT and token rate (Step 1 context table). | Task 6: scheduler and model-runner source, engine log, `powermetrics`, `py-spy`. Run set 8f on CUDA. | CONFIRMED (Task 6). The step-time shape comes from the Metal stack: MLX's 4-bit matrix multiply (jump above 32) and vllm-metal GPU work at 2–12 sequences. It is not a general vLLM mechanism. |
 | 3 | Statistical | The closed and open sweeps ran 13 days apart, and the closed sweep has no recorded launch flags. | "Same Mac, two answers: closed 12.8 req/s at p95 2.6 s, open 12 req/s at p95 8.3 s." | `config.json` dates and `target_notes`. | Closed and open runs in one session with recorded flags (8a). | OPEN |
 | 4 | Construct, external | Uniform arrivals (Ca² = 0) and a fixed request (Cs² close to 0) give almost no queueing below capacity. This is why 12 req/s holds a fixed backlog of about 96 at capacity and why goodput drops all at once. Real arrivals vary. | "Goodput falls off a cliff between 11 and 12 req/s." The knee location. | Medium-tier attainment: 100% at 11 req/s, 0.7% at 12 req/s. | Task 4 (mock: done, harness agrees with theory). Task 5 (trace burstiness: done, see "Workload"). Run set 8c (Poisson on vLLM). | OPEN (needs 8c) |
-| 5 | Construct | The TPOT-against-running fit compares run averages over a window in which the batch still grows (threat 1). The slope can be biased. | "+5.3 ms per admitted request" (`tpot-vs-running.png`). | Fit uses mean `running` over 10–60 s and p50 TPOT of all window requests. | Task 6a: rebuild engine steps from `stream_events.csv`; use the late window only. Engine stats log in 6b. | OPEN |
+| 5 | Construct | The TPOT-against-running fit compares run averages over a window in which the batch still grows (threat 1). The slope can be biased. | "+5.3 ms per admitted request" (`tpot-vs-running.png`). | Fit uses mean `running` over 10–60 s and p50 TPOT of all window requests. | Task 6a: rebuild engine steps from `stream_events.csv`; use the late window only. Engine stats log in 6b. | CONFIRMED (Task 6). The step time is a step function of the batch, not a line; do not use the slope. |
 | 6 | Construct | "Waiting = 0" depends on vLLM's definitions and on a sample each second. A request counts as running from admission, including prefill. | "The server does not see the queue." | `server_metrics.csv`: waiting = 0 up to 13.5 req/s. | Queue-time histogram from `/metrics` (8a). Scheduler source (6a). | OPEN |
 | 7 | External | `max_num_seqs` is not known. The installed default is 128, but up to 246 requests ran at once. | Where `waiting` starts. The `--max-num-seqs 32` prediction. | `vllm/config/scheduler.py:44`; `server_metrics.csv`. | Source read 2026-10-17: the API-server default is 256 on this Mac (`vllm/engine/arg_utils.py:2756`); see "Anomalies", A3. New runs pass `--max-num-seqs 256`. | RESOLVED (source) |
 | 8 | Construct | Goodput counts good completions per second inside the window. The SLO says "met by 95% of requests". These are different measures. | All SLO slides. | At 12.5 req/s: slow-tier attainment 29.6% of requests, goodput 3.58 of 10.80 served req/s (33%). | Report attainment (share of requests intended in the window) as the SLO measure, with goodput as the rate. | OPEN (small analysis change) |
-| 9 | Internal | Client and server share one computer. At 433 open streams the client can compete with the server for CPU. | Absolute latency at high load. | Not measured. | Client CPU in `powermetrics` (6b, 8a). Optional: client on a second computer. | OPEN |
-| 10 | Statistical | The closed sweep ran in ascending concurrency with repeats back to back, so time and temperature change with concurrency. The open sweep changed the order between passes. | The shape of the closed curve, including the anomaly at 8 to 16 workers. | Repeats agree closely (TPOT 151.8–152.0 ms at 8 workers), but an order effect cannot be excluded. | Shuffled closed order in 8a. | OPEN |
+| 9 | Internal | Client and server share one computer. At 433 open streams the client can compete with the server for CPU. | Absolute latency at high load. | Not measured. | Client CPU in `powermetrics` (6b, 8a). Optional: client on a second computer. | RESOLVED for closed runs up to 64 streams (busiest core ≤ 38%, Task 6). OPEN for open runs with 433 streams. |
+| 10 | Statistical | The closed sweep ran in ascending concurrency with repeats back to back, so time and temperature change with concurrency. The open sweep changed the order between passes. | The shape of the closed curve, including the anomaly at 8 to 16 workers. | Repeats agree closely (TPOT 151.8–152.0 ms at 8 workers), but an order effect cannot be excluded. | Shuffled closed order in 8a. | RESOLVED (Task 6: shuffled order within 6% of the pilot). |
 | 11 | External | The workload is narrow: a 7-token prompt, 16 output tokens, the same prompt each time, KV use at most 2.6%. Prefill and KV memory never limit throughput. | Any claim that the numbers apply to chat or agent traffic. | `records.csv`, `server_metrics.csv`. | Task 5 (real lengths: done; real prompts are 128–184 times longer, see "Workload"). State the scope on a slide. | OPEN (scope statement) |
 | 12 | Statistical | Three repeats give a weak min–max band. Rate steps near the knee are coarse (11, 12, 12.5 req/s). | The knee value. | 3 repeats per rate. | 300 s runs near the knee (8b); add 11.5 req/s if needed. | OPEN |
-| 13 | Internal | Every request uses the same prompt, so the prefix cache could skip prefill. | TTFT values. | A 7-token prompt has no full 16-token block, so a hit is unlikely (Step 1b). | Random prompt prefix (decided). Prefix-cache counters in `/metrics`. | OPEN (likely no effect) |
+| 13 | Internal | Every request uses the same prompt, so the prefix cache could skip prefill. | TTFT values. | A 7-token prompt has no full 16-token block, so a hit is unlikely (Step 1b). | Random prompt prefix (decided). Prefix-cache counters in `/metrics`. | RESOLVED for new runs (Task 6: 0 prefix-cache hits). |
 | 14 | Internal | The harness revision of the pilot runs is unknown. | Reproduction of the pilot. | `git_sha` "unknown" in all 54 runs. | New runs record `git describe --always --dirty` (done). | RESOLVED for new runs |
-| 15 | Internal | Power and thermal state are unknown. | Absolute values; drift during a sweep. | Not recorded. | `powermetrics` thermal pressure; record the power adapter and Low Power Mode. | OPEN |
+| 15 | Internal | Power and thermal state are unknown. | Absolute values; drift during a sweep. | Not recorded. | `powermetrics` thermal pressure; record the power adapter and Low Power Mode. | RESOLVED for Task 6 (pressure Nominal in all samples; AC power; `powermode` 0). OPEN for the pilot. |
 | 16 | Internal | Late sends hide waiting (coordinated omission). | All open-loop latency. | Planned-send latency is at most 4.6 ms longer (0.09% at p99) (Step 2). | — | RESOLVED for the pilot |
 | 17 | Internal | Network reads bunch token events, so the timestamps are wrong. | TPOT, ITL. | 0% of 42,000 gaps below 1 ms in four sample runs (6.5, 12, 16.5 req/s open; 32 workers closed). Each event carries one token. | — | RESOLVED for the pilot |
 | 18 | Internal | Records are lost or clipped. | All values. | 0 clipped, 0 dropped; all 54 runs pass the contract checks (Step 2). | — | RESOLVED for the pilot |
@@ -251,6 +251,231 @@ Added after E1, before E2 (written 2026-10-17, 15:55 UTC). Two forms of H1b:
     MLX waits (`mx.eval`, `async_eval`, `.item()`, `.tolist()`).
 14. Profiles at 8 and at 16 workers differ in the frames that cause the extra
     cost; the same frames take a smaller share at 16.
+
+Results of E2 and E3 (2026-10-18; `runs/methodology_review/task6b/`). Session B
+(08:22–08:44 UTC, after the commit `8848d8b` of these predictions) has the
+server log, `/metrics`, `powermetrics` and `py-spy`. Session A (2026-10-17,
+16:00–16:16 UTC) is an extra pass in the same order with runs only; it
+started 12 minutes before that commit, but after the predictions were written
+(15:55 UTC). Table: `analysis/engine_steps.py` on session B, output
+`task6b/report/engine-steps.json` and `engine-steps.png`.
+
+| Workers | 1 | 2 | 4 | 6 | 8 | 10 | 12 | 14 | 16 | 20 | 24 | 32 | 40 | 48 | 64 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Engine step ms (B) | 25.6 | 42.0 | 78.6 | 118.8 | 160.4 | 212.8 | 245.9 | 144.1 | 109.2 | 109.8 | 115.4 | 120.1 | 213.4 | 220.7 | 225.6 |
+| Engine step ms (A) | 24.5 | 42.1 | 78.8 | 118.6 | 159.8 | 212.7 | 246.2 | 144.3 | 110.3 | 110.0 | 115.1 | 119.4 | 214.1 | 219.4 | 226.6 |
+| Pure MLX step ms (E1) | 19.1 | 21.4 | 33.9 | 54.3 | 64.3 | 78.8 | 95.0 | 99.5 | 96.8 | 98.1 | 102.0 | 98.7 | 191.4 | 193.3 | 192.2 |
+| Token rate tok/s | 29 | 33 | 44 | 45 | 46 | 44 | 46 | 83 | 116 | 139 | 152 | 181 | 147 | 160 | 193 |
+| GPU active % | 99.0 | 99.0 | 98.9 | 99.5 | 99.4 | 99.8 | 99.8 | 99.4 | 99.4 | 99.3 | 99.5 | 99.5 | 99.6 | 99.5 | 99.7 |
+| GPU power W | 15.9 | 19.4 | 19.3 | 21.2 | 20.2 | 19.1 | 20.7 | 25.4 | 27.2 | 28.4 | 24.7 | 23.5 | 27.7 | 25.2 | 25.9 |
+| Server TTFT ms | 182.1 | 372.9 | 332.7 | 451.8 | 498.9 | 626.6 | 659.8 | 673.1 | 659.2 | 755.5 | 876.0 | 1086.9 | 1340.7 | 1584.7 | 1949.5 |
+| Server queue ms | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.1 | 0.0 | 0.1 | 0.1 | 0.1 | 0.1 |
+| Server prefill ms | 178.4 | 293.8 | 209.2 | 317.4 | 357.1 | 482.6 | 514.0 | 527.0 | 513.0 | 609.0 | 727.0 | 937.8 | 1193.4 | 1440.2 | 1807.5 |
+
+| # | Prediction | Result | Status |
+|---|---|---|---|
+| 4 | Shuffled step times match the ascending pilot within 10% (H1c false) | Within 6% at all 9 shared batch sizes (largest: 32 workers, 120.1 against 113.7 ms). Session A and B agree within 1.4%, except 4% at 1 worker. | HELD. Run order and heat do not cause the shape. |
+| 5 | The batch size of the fall is the same in E1 and E2 (±1 grid point) | E2 falls between 12 and 14 workers (245.9 to 144.1 ms). E1 has no fall, but its rise stops at the same point (95.0 at 12, 99.5 at 14). | PARTLY HELD. Same transition point, different shape. |
+| 6 | E2 minus E1 is about constant (±10 ms) | 6.6, 20.7, 44.7, 64.4, 96.1, 134.0, 150.8 ms from 1 to 12 workers; 12–34 ms from 16 to 64. | NOT HELD. The extra cost grows by about 12.5 ms per sequence up to 12, then almost disappears. |
+| 7 | GPU active ≥ 85% at 8 and 32 workers | 99.4% and 99.5%; 98.9–99.8% at every batch size. Thermal pressure Nominal in all samples. | HELD |
+| 8 | `py-spy`: ≥ 60% of engine-thread samples wait for MLX at 8 workers | 92.8% in `mx.async_eval` (`_submit_paged_forward_outputs`, `model_runner.py:709`); sampling 2.7%; Python graph building under 5%. Same at 1, 16 and 32 workers (86–91%). | HELD |
+| 9 | Server tokens per step agree with the client rebuild within 10% | `iteration_tokens_total` mean 1.50 / 11.29 / 22.59 / 45.18 / 90.35 at 1 / 8 / 16 / 32 / 64 workers, against workers × 23/16 (8 prompt + 15 decode tokens over 16 steps) = 1.44 / 11.5 / 23.0 / 46.0 / 92.0: within 4%. | HELD |
+| 10 | Server TTFT mean 170–185 ms at 1 worker | 182.1 ms (client median 180.6 ms). | HELD |
+| 11 | The largest part of TTFT decides H2a/H2b/H2c; expected H2b | Queue 0.0 ms, prefill 178.4 ms, front end (TTFT − queue − prefill) 3.7 ms. | HELD: H2b. The 8-token prefill itself takes 178 ms. |
+| 12 | H1b-CPU: GPU ≤ about 50% at 8 workers, `py-spy` in Python | GPU 99.4%; 93% of samples wait in MLX; the busiest CPU core averages 13.7%. | NOT HELD. H1b-CPU is false. |
+| 13 | H1b-GPU: GPU ≥ 85% and `py-spy` waits for MLX | Both hold at 8 workers. | HELD. The extra cost is GPU work that vllm-metal sends. |
+| 14 | Profiles at 8 and 16 differ in the frames of the extra cost | Same shape at 8 and 16 (92.8% and 90.6% in `async_eval`). A Python profiler cannot see inside the GPU work. | NOT HELD (not visible with `py-spy`). |
+
+Other measured facts from session B:
+- Prompt tokens per request: 8 (880 prompt tokens for 110 requests at 1
+  worker). Prefix-cache hits: 0 of all queries (threat 13).
+- The server log shows `max_num_seqs: 256` from the launch flag.
+- The busiest CPU core averages 9.9–37.8% per run, so the client and the
+  API server do not limit these closed runs (threat 9, up to 64 streams).
+- Source: vllm-metal packs the whole batch into one sequence,
+  `mx.array([all_token_ids])` (`vllm_metal/v1/model_runner.py:1183`), and
+  attention runs in its own paged Metal kernel (`attention/impls/sdpa.py`).
+  E1 used shape (batch, 1) and MLX's own attention.
+
+### Task 6: E1b, packed batch in pure MLX (written 2026-10-18, 08:51 UTC, before the run)
+
+Question: is the extra GPU cost at 2–12 sequences in the 4-bit matrix
+multiply when the batch is packed as one sequence (H1d), or in vllm-metal's own
+kernels, such as paged attention and the cache scatter (H1e)?
+Script: `scripts/mlx_step_bench.py` (new columns `packed_step_ms`,
+`packed_matmul_ms`, shape (1, batch)).
+
+15. H1d holds if the packed matrix multiply grows by about one weight read per
+    row up to 12: ≥ 120 ms at batch 8 and ≥ 170 ms at batch 12, and falls to
+    within 15% of the (batch, 1) matrix multiply from 14 rows.
+16. H1e holds if the packed matrix multiply is within 20% of the (batch, 1)
+    matrix multiply at batch 8 (62 ms). Then the extra cost is in the vllm-metal
+    kernels, and the next test is a GPU trace of one step.
+17. If H1d holds, the packed step (one forward pass of a batch-token sequence,
+    which is also the prefill of a batch-token prompt) is within 25% of the
+    vLLM engine step from 2 to 64, and an 8-token prompt takes ≥ 120 ms
+    while a 16-token prompt takes less. This would also explain A2.
+
+Results of E1b (2026-10-18; `runs/methodology_review/task6/e1b-mlx-packed.json`,
+run by the user with the server stopped; chart
+`runs/methodology_review/task6b/report/engine-steps.png`):
+
+| Batch | 1 | 2 | 4 | 8 | 12 | 14 | 16 | 32 | 40 | 64 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Matmul (batch, 1), ms | 17.1 | 18.8 | 33.0 | 62.9 | 100.2 | 93.3 | 90.2 | 91.0 | 179.8 | 185.3 |
+| Matmul packed (1, batch), ms | 16.6 | 18.8 | 31.0 | 62.8 | 101.7 | 93.3 | 90.1 | 92.9 | 179.9 | 188.0 |
+| Packed step (= prefill of a batch-token prompt), ms | 18.3 | 21.6 | 33.7 | 64.5 | 93.8 | 97.9 | 95.2 | 95.8 | 184.9 | 187.8 |
+| vLLM engine step, ms (E2) | 25.6 | 42.0 | 78.6 | 160.4 | 245.9 | 144.1 | 109.2 | 120.1 | 213.4 | 225.6 |
+
+| # | Prediction | Result | Status |
+|---|---|---|---|
+| 15 | H1d: packed matmul ≥ 120 ms at 8, ≥ 170 ms at 12 | 62.8 and 101.7 ms; the packed matmul is within 3% of the (batch, 1) matmul at every batch. | NOT HELD. H1d is false: the shape does not change the matrix multiply. |
+| 16 | H1e: packed matmul within 20% of the (batch, 1) matmul at 8 | 62.8 against 62.9 ms. | HELD. The extra cost is in vllm-metal's own GPU work, not in MLX's matrix multiply. |
+| 17 | (If H1d) packed step within 25% of the vLLM step; an 8-token prompt ≥ 120 ms and a 16-token prompt faster | Packed step 64.5 ms at 8 against 160.4 ms in vLLM; a 16-token prefill (95.2 ms) is slower than an 8-token one (64.5 ms). | NOT HELD (H1d false). |
+
+Reading:
+- Pure MLX runs the same model with the same packed shape in 64.5 ms at 8
+  tokens. vllm-metal takes 160.4 ms for a decode step of 8 requests and
+  178.4 ms for the prefill of one 8-token prompt. Both have about 100 ms of
+  extra GPU work. The extra work depends on the number of tokens in the step
+  (decode or prefill), grows up to 12 tokens, and almost stops from 14.
+- The candidates are the kernels that pure MLX does not run: the paged
+  attention kernel, the paged cache write (`reshape_and_cache`), the head-dim
+  padding and the sampler (`vllm_metal/attention/impls/sdpa.py`,
+  `vllm_metal/v1/sampling_batch.py`). Which one is not measured. A Metal GPU
+  trace (Xcode Instruments, not installed) or a timing test of each kernel
+  alone would identify it.
+
+### Task 8: run sets and predictions (written 2026-10-18, 09:26 UTC, before the runs)
+
+Basis for every number below: the pilot open sweep (`runs/vllm-metal-open-sweep/`,
+values recalculated from `records.csv` on 2026-10-18), the Task 6 closed sweep
+(session B, `task6b/report/engine-steps.json`), and Task 4 and 5. All runs use
+the launch flags of Task 6 (`--max-num-seqs 256` unless stated), the 8-token
+random-prefix prompt, 16 output tokens, and go under `runs/methodology_review/`.
+Changes from the original plan, because of Tasks 4–6: open runs are 120 s with
+a 30 s warmup (threat 1); the closed baseline is already done (Task 6b), so 8a
+repeats only three closed points; 8b adds 13 req/s; 8d is re-predicted.
+
+Pilot anchors (uniform, median of 3 repeats; N = unfinished requests at 59.5 s):
+
+| Offered req/s | 6.5 | 9 | 11 | 12 | 12.5 | 13 | 14.5 | 16.5 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Served, 35–60 s, req/s | 6.52 | 9.00 | 11.04 | 11.96 | 11.76 | 10.96 | 11.68 | 12.80 |
+| N | 14 | 20 | 47 | 96 | 152 | 209 | 311 | 437 |
+| E2E p50 / p95, s | 2.27 / 2.35 | 2.27 / 2.35 | 4.27 / 4.39 | 8.04 / 8.30 | 11.3 / 12.3 | 13.3 / 16.1 | 20.0 / 22.6 | 25.1 / 29.7 |
+| TPOT p50, ms | 129 | 130 | 244 | 462 | 655 | 758 | 1,103 | 1,198 |
+| Medium-tier attainment | 100% | 100% | 100% | 0.7% | 0% | 0% | 0% | 0% |
+| Server `waiting`, max | 0 | 0 | 0 | 0 | 0 | 0 | 54 | 171 |
+
+Closed anchors (Task 6, session B): 16 / 32 / 64 workers make 116 / 181 /
+193 tok/s (7.2 / 11.3 / 12.1 req/s); server E2E mean 2.2 / 2.8 / 5.1 s.
+
+| Set | Runs | Time | Question |
+|---|---|---|---|
+| 8a | Open uniform at 6.5, 9, 11, 12, 13, 14.5, 16.5 req/s, 2 repeats, shuffled order, 120 s (30 s warmup). Closed 16, 32, 64 workers once. Server log, `/metrics` before and after each run, `powermetrics`. `tcpdump` on one 12 req/s run. | about 35 min | Same-session baseline; server checks; wire check |
+| 8b | Open uniform at 11, 12, 13 req/s, one 300 s run each (60 s warmup). | 15 min | Is 12 req/s sustainable? |
+| 8c | Open Poisson at 9, 11, 12 req/s, 2 repeats, 120 s (30 s warmup). | 12 min | Does realistic arrival change the SLO result? |
+| 8c-gamma | Open gamma (CV 2) at 9, 11 req/s, 2 repeats, 120 s (30 s warmup). Added 2026-10-18 (user decision). | 9 min | Does burstier-than-chat traffic change it more? |
+| 8d | Restart with `--max-num-seqs 32`. Open uniform at 9, 11, 12, 13, 16.5 req/s, one 120 s run each. | 12 min | Where does the queue go when the batch is capped? |
+| 8e | `vllm bench serve`, Poisson, 8 random input tokens, 16 output tokens, `--ignore-eos`, 9, 11, 12 req/s, 120 s of requests each. | 8 min | Does a second client agree? |
+| 8f | SKIPPED (user decision, 2026-10-18: no NVIDIA GPU). | — | Is the step shape Metal-specific? Not tested; the slide states the Metal-only scope. |
+
+Predictions. "Uniform" means run set 8a at the same rate. A prediction fails
+if its threshold is not met; the result is recorded either way.
+
+8a, same-session uniform baseline:
+- 8a.1 Capacity. Served in 30–120 s is ≥ 95% of offered at 6.5, 9 and 11
+  req/s. At 13, 14.5 and 16.5 req/s served is 10.5–13.0 req/s.
+- 8a.2 Overload does not lower throughput. Served at 16.5 ≥ served at 13
+  minus 1.0 req/s.
+- 8a.3 The SLO cliff stays between 11 and 12 req/s. Medium-tier attainment
+  ≥ 95% at 11 req/s and < 50% at 12 req/s.
+- 8a.4 Steady backlog below capacity. N at 115 s: 9–21 (6.5 req/s), 13–30
+  (9), 30–65 (11), 60–160 (12). Slope of N over 60–120 s within ±0.3/s at
+  6.5, 9, 11 and 12 req/s; ≥ +0.5/s at 13 and above.
+- 8a.5 The queue hides inside the batch. At 12 req/s the server `waiting`
+  stays 0 in every sample, while E2E p50 ≥ 5 s. At 16.5 req/s `waiting`
+  becomes > 0 once `running` reaches 256.
+- 8a.6 Little's Law. L and λ·W agree within 5% at 6.5, 9 and 11 req/s.
+- 8a.7 Server check (Task 9). At every rate ≤ 12 req/s: client TTFT mean minus
+  server TTFT mean is 0–15 ms; client and server TPOT means within 5%.
+- 8a.8 Wire check (Task 9). On the 12 req/s run with `tcpdump`, the gaps
+  between request packets on the wire differ from the planned 83.3 ms gap by
+  ≤ 2 ms for 99% of requests.
+- 8a.9 Session check. Closed 16, 32, 64 workers make tok/s within 10% of
+  Task 6 (116, 181, 193).
+- 8a.10 Closed and open give different answers. Open E2E p50 at 12 req/s is
+  ≥ 1.3 × the closed E2E p50 at 64 workers (12.1 req/s, about 5.1 s).
+
+8b, long runs:
+- 8b.1 11 req/s is stable: slope of N over 150–300 s within ±0.1/s; medium
+  attainment ≥ 95%.
+- 8b.2 12 req/s is stable but near the limit: slope over 150–300 s within
+  ±0.2/s and N between 60 and 200. If it fails, the capacity statement becomes
+  "between 11 and 12 req/s".
+- 8b.3 13 req/s is overload: slope over 150–300 s ≥ +0.5/s; served 10.5–13.0
+  req/s.
+
+8c, Poisson arrivals:
+- 8c.1 The schedules are Poisson: CV of sent gaps 0.95–1.05; index of
+  dispersion (1 s) 0.6–1.4.
+- 8c.2 Low load absorbs bursts. At 9 req/s the Poisson E2E p95 is ≤ 1.3 ×
+  uniform, and medium attainment ≥ 95% for both. Reason: a burst makes the
+  batch larger, and a larger batch serves more tokens per second here.
+- 8c.3 Near capacity, bursts break the SLO. At 11 req/s the Poisson E2E p95 is
+  ≥ 1.2 × uniform, and Poisson medium attainment is < 95% while uniform is
+  ≥ 95%. This is the main slide claim: the uniform test passes an SLO that
+  realistic arrivals fail at the same mean rate.
+- 8c.4 At 12 req/s both fail the medium tier (attainment < 50%), and the
+  Poisson E2E p95 is ≥ uniform.
+- 8c.5 (added 2026-10-18, 09:42 UTC, before any Task 8 run) Batching absorbs even gamma CV 2
+  bursts at low load. At 9 req/s gamma medium attainment is ≥ 95%, and gamma
+  E2E p95 is 1.1–2.0 × uniform.
+- 8c.6 (added 2026-10-18, 09:42 UTC) Burstier is worse near capacity. At 11 req/s gamma
+  medium attainment is ≤ the Poisson value, and gamma E2E p95 is ≥ the Poisson
+  value.
+- Not predicted: a Kingman number. The service time of a batching server
+  changes with the load, so the Task 4 formula does not apply directly.
+
+8d, `--max-num-seqs 32`:
+- 8d.1 At 9 req/s the cap does nothing (pilot N about 20 < 32): served and
+  E2E p50 within 10% of uniform.
+- 8d.2 The queue moves to `waiting`. At 12, 13 and 16.5 req/s `running` stays
+  ≤ 32, `waiting` grows (> 0 and rising over 60–120 s), and TPOT p50 stays
+  ≤ 300 ms (uncapped pilot: 462–1,198 ms). TTFT carries the wait: TTFT p95 at
+  16.5 req/s ≥ 5 s.
+- 8d.3 The cap lowers capacity. Served at 13 and 16.5 req/s is 8.5–11.5
+  req/s, below the uncapped value of 8a. Reason: E2 shows 32 workers at 181
+  tok/s against 193 at 64, and in open loop each step also carries the
+  prompt tokens of new requests. This replaces the A4 prediction.
+- 8d.4 At 11 req/s: no prediction. 11 req/s is near the predicted capped
+  capacity, so either outcome is possible.
+
+8e, second client (`vllm bench serve`):
+- 8e.1 Request throughput within 5% of offered at 9 and 11 req/s.
+- 8e.2 Mean TPOT and median ITL within 15% of satlab Poisson (8c) at the same
+  rate; mean TTFT within 25% (the benchmark client has no warmup window).
+- 8e.3 At 12 req/s the benchmark client also shows mean E2E ≥ 3 × its value
+  at 9 req/s (the same knee).
+
+8f, CUDA (SKIPPED, no NVIDIA GPU; kept for the record): on vLLM with CUDA, closed tok/s does not fall when the
+batch grows from 1 to 64 workers (each step within 5% of monotonic). If it
+holds, the Metal step shape (Task 6) is not a general vLLM property.
+
+Slide claims and the prediction that tests each:
+
+| Slide claim | Prediction |
+|---|---|
+| This Mac serves about 12 req/s of 8-in/16-out requests (about 190 tok/s). | 8a.1, 8b.2 |
+| Overload does not lower throughput; it raises latency without limit. | 8a.2, 8b.3 |
+| A uniform test passes an SLO that realistic arrivals fail at the same rate. | 8c.3 |
+| A batching server absorbs bursts at low load. | 8c.2, 8c.5 |
+| Burstier arrivals hurt more near capacity. | 8c.6 |
+| The queue hides inside the batch: `waiting` = 0 while E2E is 8 s. | 8a.5 |
+| A batch cap makes the queue visible and bounds TPOT, but costs throughput. | 8d.2, 8d.3 |
+| Closed and open load give different answers on the same server. | 8a.10 |
+| The numbers are right: wire, server and a second client agree. | 8a.7, 8a.8, 8e.2 |
 
 ## Workload: real traffic against our test
 
@@ -503,6 +728,10 @@ explicitly, so no log is needed.
   TTFT grows instead. Because batch 32 is the cheapest batch per token (A1),
   served rate at overload is equal to or higher than with 256. If `waiting`
   stays 0 or TPOT still grows, H4 is wrong.
+  SUPERSEDED on 2026-10-18 by Task 8 prediction 8d.3, before any 8d run: E2
+  shows closed 32 workers at 181 tok/s and 64 workers at 193 tok/s, so a cap
+  of 32 is not the cheapest per token, and open-loop steps also carry the
+  prompt tokens of new requests.
 
 **A5. No fast tier at half load.** A consequence of A1, not a separate cause:
 above 8 requests a step costs about 112 ms, so 16 output tokens take about
@@ -510,6 +739,38 @@ above 8 requests a step costs about 112 ms, so 16 output tokens take about
 met) and at 16 workers ≈ 1.9 s. No separate experiment.
 
 **A6. Mock residual.** Parked. It does not change a claim.
+
+### Open discrepancy: vllm-metal is slow at 2–12 tokens per step
+
+Status: OPEN, not investigated further (user decision, 2026-10-18).
+
+The model itself batches well. In pure MLX (E1, E1b) a step of 8 tokens
+takes 64 ms, with the batch as (batch, 1) or packed as (1, batch); the shape
+does not matter. In vllm-metal the same step takes 160 ms (decode, 8 requests)
+or 178 ms (prefill, one 8-token prompt). The extra GPU work grows by about
+12.5 ms per token from 1 to 12 tokens (246 ms at 12), then almost stops at 14
+(144 ms) and 16 (109 ms). The GPU is 99% busy, so this is GPU work, not idle
+time (E2). The jump between 12 and 14 is at the same point where the pure-MLX
+matrix multiply stops rising, which suggests a kernel choice that depends on
+the number of rows.
+
+Candidates, most likely first. Each is a hypothesis, not a finding:
+
+| # | Candidate | Short hypothesis | Test that decides |
+|---|---|---|---|
+| C1 | Paged attention kernel (vllm-metal's own Metal kernel, `attention/impls/sdpa.py`) | For few query tokens, the kernel uses a launch layout with low GPU occupancy, so each token adds time; from about 14 tokens a different layout, or enough parallel work, fills the GPU. | Time the kernel alone at 1–64 tokens with a short context. |
+| C2 | Dtype or layout before the matrix multiply (casts to `kv_cache.dtype`, `mx.contiguous` copies, head-dim padding, `sdpa.py:451–527`) | vllm-metal gives MLX a dtype or memory layout that pure MLX does not use, and MLX picks a slower kernel for fewer than about 14 rows. | Log the dtypes and shapes at the linear-layer inputs inside vllm-metal; repeat E1 with them. |
+| C3 | One-step-ahead decode pipeline (`VLLM_METAL_DECODE_PIPELINE`, on by default) | The pipeline adds GPU work for each token, for example a lazy sample graph that runs again. | Server A/B: closed 8 and 16 workers with `VLLM_METAL_DECODE_PIPELINE=0`. |
+| C4 | Sampler (`v1/sampling_batch.py:612`) | It casts each token's 128,256 logits to float32 and samples with a sync per step. Less likely: `py-spy` puts only 2.7–4.2% of samples there. | `py-spy` share against batch; time the sampler alone. |
+| C5 | Paged KV-cache write (`reshape_and_cache`, one dispatch per layer) | A fixed cost per token per layer. Least likely: it writes only a few KB per token per layer. | Same as C1. |
+
+Excluded: MLX's matrix multiply on the packed shape (E1b, within 3%); NAX
+prefill attention (`VLLM_METAL_DISABLE_NAX`, M5 only; this Mac is M4 Pro);
+CPU work (E2: GPU 99% busy, CPU almost idle); run order and heat (E2).
+
+Talk scope: present the measured effect (same model, same GPU, 64 ms in MLX
+and 160 ms in the server at 8 requests) and say that the exact kernel is not
+identified. Do not name a candidate as the cause.
 
 ### Task 6 commands
 
@@ -991,3 +1252,129 @@ where the 178 ms first-token time goes. E2 and E3 decide (predictions 4–14).
 
 Next. User: run E2 and E3 ("Task 6 commands"); say when `ALL-DONE` appears.
 Agent: Task 6c, analyse E2 and E3.
+
+### Step 6c: E2 and E3 results (2026-10-18)
+
+Owner: User ran E2 and E3; Agent analysed.
+
+Done: analysed the 15 closed runs of session B with the server metrics, GPU
+samples and four `py-spy` profiles, and the 15 runs of session A. Added
+`analysis/engine_steps.py` (engine steps, server histogram means and GPU
+samples per run, and the chart). Added the packed-batch columns to
+`scripts/mlx_step_bench.py` and wrote the E1b predictions before any run.
+
+Run, measured, calculated:
+- `.venv/bin/python analysis/engine_steps.py runs/methodology_review/task6b/runs/20261018T08* --metrics runs/methodology_review/task6b/metrics --powermetrics runs/methodology_review/task6b/powermetrics.txt --mlx runs/methodology_review/task6/e1-mlx-steps.json -o runs/methodology_review/task6b/report`
+- Results table and prediction status: "Predictions → Task 6".
+- `py-spy` (engine busy-loop thread, 2,996–2,999 samples per profile): 86–93%
+  in `mx.async_eval`.
+
+Result:
+- The GPU is busy 99% of the time at every batch size. The CPU is almost idle.
+  The engine thread waits for MLX. So the extra cost at 2–12 sequences is GPU
+  work that vllm-metal sends (H1b-GPU), not Python work (H1b-CPU is false).
+- The step time rises by about 20 ms per sequence up to 12 workers (245.9 ms),
+  then falls to 109 ms at 16. A batch of 12 makes 46 tok/s; a batch of 16
+  makes 116 tok/s.
+- The 178 ms first-token time at 1 worker is prefill (178.4 ms), not queue or
+  front end (H2b).
+- Run order, heat, prefix caching and client CPU do not explain the results.
+
+Unknown: which GPU work vllm-metal adds at 2–12 sequences: the matrix multiply
+on the packed shape (H1d) or vllm-metal's own kernels (H1e). E1b decides.
+
+Next. User: stop the server, run E1b (one command, about 5 minutes), say when
+done. Agent: compare E1b with predictions 15–17 and close Task 6.
+
+### Step 6d: E1b, the packed batch in pure MLX (2026-10-18)
+
+Owner: User ran E1b; Agent analysed.
+
+Done: compared E1b with predictions 15–17; redrew the engine-step chart with
+the pure-MLX lines.
+
+Run, measured, calculated:
+- `/opt/homebrew/Cellar/vllm-metal/0.30.0/libexec/bin/python scripts/mlx_step_bench.py -o runs/methodology_review/task6/e1b-mlx-packed.json`
+- `analysis/engine_steps.py ... --mlx runs/methodology_review/task6/e1b-mlx-packed.json`
+- Packed matmul within 3% of the (batch, 1) matmul at every batch; packed step
+  64.5 ms at 8 tokens against 160.4 ms (decode) and 178.4 ms (prefill) in vLLM.
+
+Result: H1d is false and H1e holds. MLX does the same matrix multiply for both
+shapes. The extra 100 ms at 8 tokens is GPU work that only vllm-metal does.
+The same cost explains both A1 (slow small batches) and A2 (slow first token).
+
+Task 6 conclusion:
+- A1: two causes. Above 32 sequences, MLX's 4-bit matrix multiply works in
+  blocks of 32 rows (validated, E1). At 2–12 tokens per step, vllm-metal adds
+  about 12.5 ms of GPU work per token, which almost stops from 14 (validated,
+  E2 and E1b). The exact kernel is not identified.
+- A2: the 178 ms first token is prefill (E3), with the same vllm-metal cost.
+- A3: resolved (source and launch flag). A4 and A5: follow from A1; A4 is
+  tested in run set 8d.
+- For the talk: the same model on the same GPU takes 64 ms per step in its own
+  library and 160 ms in the server at 8 requests. A batch of 12 makes 46 tok/s,
+  a batch of 16 makes 116 tok/s. This is Metal-specific (threat 2); do not
+  claim it for vLLM on CUDA.
+
+Unknown: which vllm-metal kernel does the extra work. Candidates C1–C5 are in
+"Anomalies → Open discrepancy". Not investigated further (user decision).
+
+Next. User: decide whether to identify the kernel (needs Xcode Instruments, or
+a per-kernel timing test) or to close Task 6. Agent: Task 7, predictions for
+the Task 8 run sets.
+
+### Step 7: Predictions for the Task 8 run sets (2026-10-18)
+
+Owner: Agent wrote; User approves and commits.
+
+Done: wrote "Predictions → Task 8": six run sets with rates, durations and
+repeats; 24 predictions with thresholds; a map from each slide claim to its
+prediction. Marked the old A4 prediction for `--max-num-seqs 32` as
+superseded, with the reason.
+
+Run, measured, calculated: pilot anchors recalculated from `records.csv` and
+`server_metrics.csv` of the 27 pilot open runs; closed anchors from
+`task6b/report/engine-steps.json`. No new runs.
+
+Result: the predictions are ready for review. Two changed because of Task 6:
+the batch cap (8d.3) now predicts lower capacity, and the Poisson effect is
+predicted to be small at 9 req/s and large at 11 req/s (8c.2, 8c.3).
+
+Unknown: how the step cost grows with the prompt tokens of new requests in
+open loop; 8d.3 and 8d.4 depend on it.
+
+Next. User: review the predictions; commit `docs/methodology-review.md` before
+any Task 8 run. Agent: Task 8 preparation (`scripts/sweep.py` saves the full
+`/metrics` before and after each run; attainment as the SLO measure, threat
+8), then the 8a commands.
+
+### Step 8-prep: Preparation for the Task 8 runs (2026-10-18)
+
+Owner: Agent.
+
+Done:
+- `scripts/sweep.py`: new options `--duration`, `--warmup`, `--repeats` (1–3;
+  forward, reversed, shuffled); the full `/metrics` text before and after each
+  run is saved as `metrics_before.prom` and `metrics_after.prom`.
+- `analysis/analyze.py`: SLO attainment per tier (`attainment_<tier>`, the share
+  of requests intended in the window that meet both limits); the table shows
+  the medium tier (threat 8).
+- Predictions 8c.5 and 8c.6 (gamma) added at 09:42 UTC; set 8c-gamma added;
+  8f marked skipped (no NVIDIA GPU).
+- `runs/methodology_review/task8/`: base configs (uniform, Poisson, gamma CV 2;
+  no seed, so each repeat gets a new schedule), closed configs 16/32/64, and
+  `run.sh <set>`. `run.sh` stops if `/metrics` is not reachable or if the
+  server log does not show the expected `max_num_seqs`.
+
+Run, measured, calculated (mock and a local stand-in for `/metrics`; no Metal
+server ran):
+- One 5 s Poisson run with snapshots: `metrics_before.prom`,
+  `metrics_after.prom` and `server_metrics.csv` written; PASS.
+- `sweep.py --rates 10,20 --repeats 2 --duration 5 --warmup 1`: order 10, 20,
+  20, 10; 4 PASS; attainment shown.
+- Pilot check of attainment: 100.0% at 11 req/s and 0.7% at 12 req/s, the same
+  as the Task 2 values.
+- `python -m unittest tests.test_open_sweep`: OK. `cargo test`: 50 passed.
+
+Next. User: commit, restart, then the session steps ("Task 8 run plan").
+Agent: analyse each set when the user reports it.

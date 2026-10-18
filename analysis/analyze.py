@@ -42,6 +42,7 @@ COLUMNS = [
     "run_id", "name", "mode", "concurrency",
     "requested_rate_hz", "sent_rate_hz", "served_rate_hz", "output_token_rate_hz",
     *(f"goodput_{slo}_hz" for slo in SLOS),
+    *(f"attainment_{slo}" for slo in SLOS),
     *(f"{metric}_{Q_LABELS[q]}_ms" for metric in (*LATENCY_METRICS, "sendlag") for q in QUANTILES),
     *(f"{metric}_n" for metric in LATENCY_METRICS),
     "outstanding_at_warmup", "outstanding_at_end", "outstanding_slope_req_s",
@@ -190,6 +191,9 @@ def load_run(run_dir: Path) -> dict:
     ttft_plan, e2e_plan = [], []
     served = request_tokens = 0
     good = dict.fromkeys(SLOS, 0)
+    # Attainment: share of requests intended in the window that meet both limits;
+    # a failed request does not meet them.
+    attained, population = dict.fromkeys(SLOS, 0), 0
     for r in requests:
         if r.status == "ok":
             ok_ids.add(r.id)
@@ -201,12 +205,15 @@ def load_run(run_dir: Path) -> dict:
                 ttft_plan.append((r.first - r.intended) / 1e6)
                 if r.tokens > 1:
                     tpot.append((r.last - r.first) / (r.tokens - 1) / 1e6)
+                for slo, (ttft_ms, e2e_ms) in SLOS.items():
+                    attained[slo] += ttft[-1] <= ttft_ms and e2e[-1] <= e2e_ms
             if start <= r.last < end:
                 served += 1
                 for slo, (ttft_ms, e2e_ms) in SLOS.items():
                     if (r.first - r.actual) / 1e6 <= ttft_ms and (r.last - r.actual) / 1e6 <= e2e_ms:
                         good[slo] += 1
         if r.status != "clipped" and not r.warmup:
+            population += 1
             lags.append((r.actual - r.intended) / 1e6)
 
     itl, by_request = [], {}
@@ -270,6 +277,7 @@ def load_run(run_dir: Path) -> dict:
     }
     for slo, count in good.items():
         row[f"goodput_{slo}_hz"] = count / window_s
+        row[f"attainment_{slo}"] = attained[slo] / population if population else float("nan")
     for metric, quantiles in percentiles.items():
         for q, value in quantiles.items():
             row[f"{metric}_{Q_LABELS[q]}_ms"] = value
@@ -513,7 +521,7 @@ def send_lag(runs, out_dir: Path):
 
 def print_table(runs) -> None:
     """One line per load level, median of repeats. Little's Law: L should equal λ·W."""
-    header = (f"{'load':>6} {'served':>7} {'good':>6} {'p95 ttft':>9} {'p95 e2e':>8} {'plan':>6} "
+    header = (f"{'load':>6} {'served':>7} {'good':>6} {'att %':>6} {'p95 ttft':>9} {'p95 e2e':>8} {'plan':>6} "
               f"{'unfin.':>6} {'slope/s':>8} {'L':>6} {'λ·W':>6}  note")
     for mode, label in (("open", "offered req/s"), ("closed", "workers")):
         groups = grouped(runs, mode)
@@ -525,6 +533,7 @@ def print_table(runs) -> None:
             med = lambda field: aggregate(group, field)[0]
             note = "FAILED harness check" if any(r["failed"] for r in group) else ""
             print(f"{load:>6g} {med('served_rate_hz'):>7.2f} {med('goodput_medium_hz'):>6.2f} "
+                  f"{100 * med('attainment_medium'):>6.1f} "
                   f"{med('ttft_p95_ms') / 1e3:>9.2f} {med('e2e_p95_ms') / 1e3:>8.2f} "
                   f"{med('e2e_from_plan_p95_ms') / 1e3:>6.2f} "
                   f"{med('outstanding_at_end'):>6.0f} {med('outstanding_slope_req_s'):>8.2f} "

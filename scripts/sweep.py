@@ -7,7 +7,10 @@ The server (vLLM or the bundled mock) must already be running. This script never
   sweep.py confirm --rate R --server-notes "..."            3 repeats of 300 s at one rate
   sweep.py analyze                                          rebuild charts from saved runs
 
-The three passes run forward, reversed, and shuffled so drift cannot look like a knee.
+--duration, --warmup and --repeats change the run length, warmup and number of passes.
+The passes run forward, reversed, and shuffled so drift cannot look like a knee. When the
+server has /metrics, each run folder also gets the full text before and after the run
+(metrics_before.prom, metrics_after.prom) and one waiting/running sample per second.
 The mock: `target/release/mock 4 0.05 8123`, then add
 `--base-config config.json --name mock-open --runs-dir runs/mock-sweep --expected-capacity 80
 --max-in-flight 4096`.
@@ -39,14 +42,14 @@ METRICS = {
 METRIC_LINE = re.compile(r"^([^\s{]+)(?:\{[^}]*\})?\s+([^\s]+)")
 
 
-def schedule(rates: tuple[float, ...], repeats_rate: float | None = None) -> list[tuple[int, float]]:
-    if repeats_rate is not None:  # confirm: one rate, three repeats
-        return [(rep, repeats_rate) for rep in range(1, 4)]
+def schedule(rates: tuple[float, ...], repeats_rate: float | None = None,
+             repeats: int = 3) -> list[tuple[int, float]]:
+    if repeats_rate is not None:  # confirm: one rate, repeated
+        return [(rep, repeats_rate) for rep in range(1, repeats + 1)]
     shuffled = list(rates)
     random.Random(20261011).shuffle(shuffled)
-    return ([(1, rate) for rate in rates]
-            + [(2, rate) for rate in reversed(rates)]
-            + [(3, rate) for rate in shuffled])
+    passes = (rates, tuple(reversed(rates)), shuffled)[:repeats]
+    return [(rep, rate) for rep, order in enumerate(passes, 1) for rate in order]
 
 
 def run_name(prefix: str, phase: str, rep: int, rate: float) -> str:
@@ -54,14 +57,14 @@ def run_name(prefix: str, phase: str, rep: int, rate: float) -> str:
 
 
 def make_config(base: dict, name: str, phase: str, rate: float, server_notes: str,
-                max_in_flight: int) -> dict:
+                max_in_flight: int, duration_s: float | None = None, warmup_s: float = 10.0) -> dict:
     cfg = dict(base)
     cfg.update({
         "name": name,
         "mode": "open",
         "rate": rate,
-        "duration_s": 300.0 if phase == "confirm" else 60.0,
-        "warmup_s": 10.0,
+        "duration_s": duration_s or (300.0 if phase == "confirm" else 60.0),
+        "warmup_s": warmup_s,
         "max_in_flight": max_in_flight,
         "request_timeout_s": 120.0,
         "target_notes": server_notes,
@@ -122,6 +125,9 @@ def run_one(cfg: dict, runs_dir: Path, metrics_url: str | None) -> Path:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(cfg, handle)
         config_path = Path(handle.name)
+    snapshots = {}
+    if metrics_url:
+        snapshots["metrics_before.prom"] = get_text(metrics_url)
     try:
         if worker:
             worker.start()
@@ -134,6 +140,8 @@ def run_one(cfg: dict, runs_dir: Path, metrics_url: str | None) -> Path:
         if worker:
             worker.join(timeout=3)
         config_path.unlink(missing_ok=True)
+    if metrics_url:
+        snapshots["metrics_after.prom"] = get_text(metrics_url)
     print(proc.stdout, end="", flush=True)
     if proc.stderr:
         print(proc.stderr, end="", file=sys.stderr, flush=True)
@@ -145,6 +153,8 @@ def run_one(cfg: dict, runs_dir: Path, metrics_url: str | None) -> Path:
         run_dir = REPO / run_dir
     if not (run_dir / "summary.json").exists():
         raise RuntimeError(f"no summary.json for {cfg['name']} at {run_dir}")
+    for name, text in snapshots.items():
+        (run_dir / name).write_text(text)
     if samples:
         with (run_dir / "server_metrics.csv").open("w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=["wall_unix_ns", *METRICS.values()])
@@ -186,6 +196,10 @@ def main() -> int:
                         help="closed-loop runs to add to the report, e.g. runs/vllm-metal-closed-sweep")
     parser.add_argument("--expected-capacity", type=float, help="known capacity, req/s (the mock)")
     parser.add_argument("--server-notes", help="exact server launch flags and cache setting")
+    parser.add_argument("--duration", type=float, help="run length in s (default 60; confirm 300)")
+    parser.add_argument("--warmup", type=float, default=10.0, help="warmup in s (default 10)")
+    parser.add_argument("--repeats", type=int, default=3, choices=(1, 2, 3),
+                        help="passes: forward, reversed, shuffled (default 3)")
     args = parser.parse_args()
     try:
         rates = tuple(sorted({float(v) for v in args.rates.split(",")})) if args.rates else RATES
@@ -227,9 +241,9 @@ def main() -> int:
 
     runs_dir.mkdir(parents=True, exist_ok=True)
     found = existing_runs(runs_dir)
-    for rep, rate in schedule(rates, args.rate if phase == "confirm" else None):
+    for rep, rate in schedule(rates, args.rate if phase == "confirm" else None, args.repeats):
         cfg = make_config(base, run_name(args.name, phase, rep, rate), phase, rate,
-                          args.server_notes, args.max_in_flight)
+                          args.server_notes, args.max_in_flight, args.duration, args.warmup)
         name = cfg["name"]
         if name in found:
             saved = json.loads((found[name] / "config.json").read_text())["config"]
